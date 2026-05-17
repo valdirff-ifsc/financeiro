@@ -40,9 +40,12 @@ function profileName(user) {
 }
 
 export async function getSessionUser() {
+  const { data: sessionData } = await supabase.auth.getSession();
+  if (!sessionData.session) return null;
+
   const { data, error } = await supabase.auth.getUser();
-  if (error) return null;
-  return data.user;
+  if (error) return sessionData.session.user || null;
+  return data.user || sessionData.session.user || null;
 }
 
 export async function signIn(email, password) {

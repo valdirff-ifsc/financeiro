@@ -59,7 +59,24 @@ const state = {
   unsubscribeRealtime: null,
 };
 
-async function initializeForUser(user) {
+function setRoute(route, updateHash = true) {
+  state.route = route || "dashboard";
+  if (updateHash && window.location.hash !== `#/${state.route}`) {
+    window.location.hash = `#/${state.route}`;
+  }
+}
+
+function resetAuthenticatedState() {
+  state.user = null;
+  state.data = defaultData;
+  state.householdId = "";
+  if (state.unsubscribeRealtime) {
+    state.unsubscribeRealtime();
+    state.unsubscribeRealtime = null;
+  }
+}
+
+async function initializeForUser(user, options = {}) {
   state.user = user;
   const remote = await loadRemoteData(user);
   state.data = remote.data;
@@ -69,6 +86,7 @@ async function initializeForUser(user) {
     await reloadRemote();
     render();
   });
+  if (options.redirectToDashboard) setRoute("dashboard", true);
   state.authReady = true;
   render();
 }
@@ -85,7 +103,7 @@ async function bootstrap() {
   } catch (error) {
     console.error(error);
     state.authReady = true;
-    state.user = null;
+    resetAuthenticatedState();
     render();
     showToast("Não foi possível conectar ao Supabase.");
   }
@@ -160,6 +178,14 @@ function showToast(message) {
   showToast.timer = window.setTimeout(() => {
     toast.hidden = true;
   }, 2600);
+}
+
+function authErrorMessage(error) {
+  const message = String(error?.message || "").toLowerCase();
+  if (message.includes("invalid login credentials")) return "E-mail ou senha inválidos.";
+  if (message.includes("email not confirmed")) return "Confirme o e-mail no Supabase antes de entrar.";
+  if (message.includes("missing supabase environment")) return "Configure as variáveis do Supabase no ambiente.";
+  return error?.message || "Não foi possível autenticar.";
 }
 
 async function reloadRemote() {
@@ -261,7 +287,7 @@ function routeMeta(route) {
 }
 
 function renderNav() {
-  sidebarNav.innerHTML = navItems
+  const routeButtons = navItems
     .map(
       (item) => `
         <button class="nav-item ${state.route === item.route ? "active" : ""}" type="button" data-route="${item.route}">
@@ -271,6 +297,14 @@ function renderNav() {
       `,
     )
     .join("");
+
+  sidebarNav.innerHTML = `
+    ${routeButtons}
+    <button class="nav-item" type="button" data-action="logout">
+      <i data-lucide="log-out"></i>
+      <span>Sair</span>
+    </button>
+  `;
 }
 
 function renderMonthSelector() {
@@ -1239,10 +1273,20 @@ document.querySelector("#menuToggle").addEventListener("click", () => {
   sidebar.classList.toggle("open");
 });
 
-sidebarNav.addEventListener("click", (event) => {
+sidebarNav.addEventListener("click", async (event) => {
+  const actionButton = event.target.closest("[data-action]");
+  if (actionButton?.dataset.action === "logout") {
+    await signOut();
+    resetAuthenticatedState();
+    setRoute("dashboard", true);
+    sidebar.classList.remove("open");
+    render();
+    return;
+  }
+
   const button = event.target.closest("[data-route]");
   if (!button) return;
-  state.route = button.dataset.route;
+  setRoute(button.dataset.route, false);
   state.editing = {};
   window.location.hash = `#/${state.route}`;
   sidebar.classList.remove("open");
@@ -1273,11 +1317,11 @@ appRoot.addEventListener("submit", async (event) => {
       const response = await signIn(raw.email, raw.password);
       if (response.error) throw response.error;
       state.user = response.data.user || (await getSessionUser());
-      if (state.user) await initializeForUser(state.user);
+      if (state.user) await initializeForUser(state.user, { redirectToDashboard: true });
       showToast("Login realizado.");
     } catch (error) {
       console.error(error);
-      showToast(error.message || "Não foi possível autenticar.");
+      showToast(authErrorMessage(error));
     }
     return;
   }
@@ -1348,9 +1392,8 @@ appRoot.addEventListener("click", async (event) => {
   }
   if (action === "logout") {
     await signOut();
-    state.user = null;
-    state.data = defaultData;
-    state.householdId = "";
+    resetAuthenticatedState();
+    setRoute("dashboard", true);
     render();
   }
 });
@@ -1366,13 +1409,11 @@ window.addEventListener("hashchange", () => {
 onAuthChange(async (user) => {
   if (!state.authReady) return;
   if (user && user.id !== state.user?.id) {
-    await initializeForUser(user);
+    await initializeForUser(user, { redirectToDashboard: true });
   }
   if (!user && state.user) {
-    state.user = null;
-    state.data = defaultData;
-    state.householdId = "";
-    if (state.unsubscribeRealtime) state.unsubscribeRealtime();
+    resetAuthenticatedState();
+    setRoute("dashboard", true);
     render();
   }
 });
