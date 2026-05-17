@@ -10,7 +10,11 @@ import {
   signOut,
   subscribeToHousehold,
   toDbAccount,
+  toDbCard,
   toDbCategory,
+  toDbInvestment,
+  toDbMarketGroup,
+  toDbMarketHistory,
   toDbPlanning,
   toDbSettings,
   toDbTransaction,
@@ -230,6 +234,14 @@ function cardOptions(selected = "", includeEmpty = false) {
   const list = state.data.cards.map((card) => ({ value: card.id, label: card.name }));
   if (includeEmpty) list.unshift({ value: "", label: "Sem cartão" });
   return options(list, selected);
+}
+
+function memberName(id) {
+  return state.data.members?.find((member) => member.id === id)?.displayName || "Usuário";
+}
+
+function currentUserName() {
+  return memberName(state.user?.id);
 }
 
 function metricCard({ label, value, note = "", icon = "circle-dollar-sign", tone = "" }) {
@@ -736,6 +748,7 @@ function transactionForm(record = {}) {
         <span class="form-label">Observações</span>
         <textarea name="notes">${escapeHtml(record?.notes || "")}</textarea>
       </label>
+      <div class="form-helper full">Responsável: ${escapeHtml(record?.createdBy ? memberName(record.createdBy) : currentUserName())}</div>
       <div class="form-actions">
         ${
           record?.id
@@ -788,7 +801,7 @@ function transactionsTable(records) {
 function transactionRow(record) {
   const signedTone = record.type === "income" ? "positive" : "negative";
   const amount = record.type === "card" ? cardInstallmentAmount(record) : toNumber(record.amount);
-  const creator = state.data.members?.find((member) => member.id === record.createdBy)?.displayName || "Usuário";
+  const creator = memberName(record.createdBy);
   return `
     <tr>
       <td>
@@ -814,35 +827,42 @@ function transactionRow(record) {
 
 function renderAccounts() {
   const finance = calculateFinance(state.data, state.month);
+  const editing = state.editing.accounts ? state.data.accounts.find((account) => account.id === state.editing.accounts) : null;
   return `
     <section class="module-page">
       <section class="account-grid">
-        ${finance.accounts
-          .map(
-            (account) => `
-              <article class="account-card">
-                <div class="account-top">
-                  <div>
-                    <span>${escapeHtml(account.type)}</span>
-                    <strong>${escapeHtml(account.name)}</strong>
+        ${
+          finance.accounts
+            .map(
+              (account) => `
+                <article class="account-card">
+                  <div class="account-top">
+                    <div>
+                      <span>${escapeHtml(account.type)}</span>
+                      <strong>${escapeHtml(account.name)}</strong>
+                    </div>
+                    ${account.isPrimary ? badge("Principal", "success") : badge("Secundária")}
                   </div>
-                  ${account.isPrimary ? badge("Principal", "success") : badge("Secundária")}
-                </div>
-                <div class="account-balance">${formatCurrency(account.balance)}</div>
-                <div class="account-flow">
-                  <span>Entradas <b>${formatCurrency(account.income)}</b></span>
-                  <span>Saídas <b>${formatCurrency(account.expense)}</b></span>
-                  <span>Projetado <b>${formatCurrency(account.projectedBalance)}</b></span>
-                </div>
-                <p>${escapeHtml(account.notes || "")}</p>
-              </article>
-            `,
-          )
-          .join("")}
+                  <div class="account-balance">${formatCurrency(account.balance)}</div>
+                  <div class="account-flow">
+                    <span>Entradas <b>${formatCurrency(account.income)}</b></span>
+                    <span>Saídas <b>${formatCurrency(account.expense)}</b></span>
+                    <span>Projetado <b>${formatCurrency(account.projectedBalance)}</b></span>
+                  </div>
+                  <p>${escapeHtml(account.notes || "")}</p>
+                  <div class="row-actions">
+                    <button class="action-link" type="button" data-action="edit" data-collection="accounts" data-id="${account.id}"><i data-lucide="pencil"></i><span>Editar</span></button>
+                    <button class="action-link" type="button" data-action="delete" data-collection="accounts" data-id="${account.id}"><i data-lucide="trash-2"></i><span>Excluir</span></button>
+                  </div>
+                </article>
+              `,
+            )
+            .join("") || `<div class="empty-state">Nenhuma conta cadastrada.</div>`
+        }
       </section>
-      <section class="form-panel">
-        <div class="panel-header"><div><h2 class="panel-title">Ajustar conta</h2><p class="panel-subtitle">Use para atualizar saldo, observações ou criar novas contas.</p></div></div>
-        ${accountForm()}
+      <section class="form-panel" id="accountForm">
+        <div class="panel-header"><div><h2 class="panel-title">${editing ? "Editar conta" : "Nova conta"}</h2><p class="panel-subtitle">Use para atualizar saldo, observações ou criar novas contas.</p></div></div>
+        ${accountForm(editing || {})}
       </section>
     </section>
   `;
@@ -858,7 +878,8 @@ function accountForm(record = {}) {
       <label class="form-group"><span class="form-label">Principal</span><span class="checkbox-row"><input name="isPrimary" type="checkbox" ${record.isPrimary ? "checked" : ""} /><span>Sim</span></span></label>
       <label class="form-group full"><span class="form-label">Observações</span><textarea name="notes">${escapeHtml(record.notes || "")}</textarea></label>
       <div class="form-actions">
-        <button class="button" type="submit"><i data-lucide="save"></i><span>Adicionar conta</span></button>
+        ${record.id ? `<button class="button ghost" type="button" data-action="cancel-edit" data-collection="accounts"><i data-lucide="x"></i><span>Cancelar</span></button>` : ""}
+        <button class="button" type="submit"><i data-lucide="save"></i><span>${record.id ? "Salvar conta" : "Adicionar conta"}</span></button>
       </div>
     </form>
   `;
@@ -866,10 +887,15 @@ function accountForm(record = {}) {
 
 function renderCards() {
   const finance = calculateFinance(state.data, state.month);
+  const editing = state.editing.cards ? state.data.cards.find((card) => card.id === state.editing.cards) : null;
   return `
     <section class="module-page">
       <section class="card-board">
-        ${finance.cardData.map(cardPanel).join("")}
+        ${finance.cardData.map(cardPanel).join("") || `<div class="empty-state">Nenhum cartão cadastrado.</div>`}
+      </section>
+      <section class="form-panel" id="cardForm">
+        <div class="panel-header"><div><h2 class="panel-title">${editing ? "Editar cartão" : "Novo cartão"}</h2><p class="panel-subtitle">Cadastre limites, vencimento e conta vinculada.</p></div></div>
+        ${cardForm(editing || {})}
       </section>
       <section class="form-panel elevated" id="cardPurchaseForm">
         <div class="panel-header"><div><h2 class="panel-title">Adicionar compra no cartão</h2><p class="panel-subtitle">Compras parceladas e recorrentes entram na fatura e no limite.</p></div></div>
@@ -920,7 +946,29 @@ function cardPanel(card) {
             : `<div class="empty-state compact">Nenhuma compra cadastrada.</div>`
         }
       </div>
+      <div class="row-actions">
+        <button class="action-link" type="button" data-action="edit" data-collection="cards" data-id="${card.id}"><i data-lucide="pencil"></i><span>Editar</span></button>
+        <button class="action-link" type="button" data-action="delete" data-collection="cards" data-id="${card.id}"><i data-lucide="trash-2"></i><span>Excluir</span></button>
+      </div>
     </article>
+  `;
+}
+
+function cardForm(record = {}) {
+  return `
+    <form class="record-form" data-form="card">
+      <label class="form-group wide"><span class="form-label">Nome</span><input name="name" value="${escapeHtml(record.name || "")}" required /></label>
+      <label class="form-group"><span class="form-label">Conta vinculada</span><select name="accountId">${accountOptions(record.accountId || "", true)}</select></label>
+      <label class="form-group"><span class="form-label">Limite total</span><input name="limitTotal" type="number" step="0.01" value="${escapeHtml(record.limitTotal || "")}" required /></label>
+      <label class="form-group"><span class="form-label">Fechamento</span><input name="closingDay" type="number" min="1" max="31" value="${escapeHtml(record.closingDay || 1)}" required /></label>
+      <label class="form-group"><span class="form-label">Vencimento</span><input name="dueDay" type="number" min="1" max="31" value="${escapeHtml(record.dueDay || 1)}" required /></label>
+      <label class="form-group"><span class="form-label">Status</span><select name="status">${options(["aberta", "fechada", "paga", "atrasada"].map((status) => ({ value: status, label: titleCase(status) })), record.status || "aberta")}</select></label>
+      <label class="form-group full"><span class="form-label">Observações</span><textarea name="notes">${escapeHtml(record.notes || "")}</textarea></label>
+      <div class="form-actions">
+        ${record.id ? `<button class="button ghost" type="button" data-action="cancel-edit" data-collection="cards"><i data-lucide="x"></i><span>Cancelar</span></button>` : ""}
+        <button class="button" type="submit"><i data-lucide="save"></i><span>${record.id ? "Salvar cartão" : "Adicionar cartão"}</span></button>
+      </div>
+    </form>
   `;
 }
 
@@ -941,6 +989,9 @@ function cardPurchaseForm() {
 
 function renderPlanning() {
   const finance = calculateFinance(state.data, state.month);
+  const editing = state.editing.planning_items
+    ? state.data.planningItems.find((item) => item.id === state.editing.planning_items)
+    : null;
   return `
     <section class="module-page">
       <section class="planning-sections">
@@ -949,36 +1000,50 @@ function renderPlanning() {
         ${planningGroup("Assinaturas", "subscription")}
         ${marketPlanning(finance)}
       </section>
-      <section class="form-panel elevated">
-        <div class="panel-header"><div><h2 class="panel-title">Novo item de planejamento</h2><p class="panel-subtitle">Itens ativos geram pendências automaticamente todos os meses.</p></div></div>
-        ${planningForm()}
+      <section class="form-panel elevated" id="planningForm">
+        <div class="panel-header"><div><h2 class="panel-title">${editing ? "Editar planejamento" : "Novo item de planejamento"}</h2><p class="panel-subtitle">Itens ativos geram pendências automaticamente todos os meses.</p></div></div>
+        ${planningForm(editing || {})}
       </section>
     </section>
   `;
 }
 
 function planningGroup(title, group) {
-  const items = state.data.planningItems.filter((item) => item.group === group && item.active);
+  const items = state.data.planningItems.filter((item) => item.group === group);
   return `
     <section class="panel">
       <div class="panel-header"><div><h2 class="panel-title">${escapeHtml(title)}</h2><p class="panel-subtitle">${items.length} item(ns) recorrentes</p></div></div>
       <div class="split-list">
-        ${items
-          .map(
-            (item) => `
-              <div class="split-row">
-                <span><strong>${escapeHtml(item.name)}</strong><span>Dia ${item.day} · ${escapeHtml(item.paymentMethod)} · ${escapeHtml(getCategoryName(state.data, item.categoryId))}</span></span>
-                <strong>${formatCurrency(item.amount)}</strong>
-              </div>
-            `,
-          )
-          .join("")}
+        ${
+          items
+            .map(
+              (item) => `
+                <div class="split-row">
+                  <span><strong>${escapeHtml(item.name)}</strong><span>Dia ${item.day} · ${escapeHtml(item.paymentMethod)} · ${escapeHtml(getCategoryName(state.data, item.categoryId))}</span></span>
+                  <span class="row-actions">
+                    ${badge(item.active ? "Ativo" : "Inativo", item.active ? "success" : "neutral")}
+                    <strong>${formatCurrency(item.amount)}</strong>
+                    <button class="action-link" type="button" data-action="edit" data-collection="planning_items" data-id="${item.id}"><i data-lucide="pencil"></i><span>Editar</span></button>
+                    <button class="action-link" type="button" data-action="toggle-active" data-id="${item.id}"><i data-lucide="${item.active ? "pause" : "play"}"></i><span>${item.active ? "Desativar" : "Ativar"}</span></button>
+                    <button class="action-link" type="button" data-action="delete" data-collection="planning_items" data-id="${item.id}"><i data-lucide="trash-2"></i><span>Excluir</span></button>
+                  </span>
+                </div>
+              `,
+            )
+            .join("") || `<div class="empty-state compact">Nenhum item cadastrado.</div>`
+        }
       </div>
     </section>
   `;
 }
 
 function marketPlanning(finance) {
+  const editingGroup = state.editing.market_groups
+    ? state.data.marketGroups.find((group) => group.id === state.editing.market_groups)
+    : null;
+  const editingHistory = state.editing.market_history
+    ? state.data.marketHistory.find((entry) => entry.id === state.editing.market_history)
+    : null;
   return `
     <section class="panel">
       <div class="panel-header"><div><h2 class="panel-title">Mercado estimado</h2><p class="panel-subtitle">Planejamento agregado por grandes categorias.</p></div></div>
@@ -988,30 +1053,96 @@ function marketPlanning(finance) {
       </div>
       ${comparisonBars(finance.market.grouped)}
       ${lineChart(finance.market.history.map((entry) => ({ label: monthLabel(entry.month).slice(0, 3), value: entry.amount })), { color: "#d97706" })}
+      <div class="split-list">
+        ${state.data.marketGroups
+          .map(
+            (group) => `
+              <div class="split-row">
+                <span><strong>${escapeHtml(group.name)}</strong><span>Previsão do grupo</span></span>
+                <span class="row-actions">
+                  <strong>${formatCurrency(group.forecast)}</strong>
+                  <button class="action-link" type="button" data-action="edit" data-collection="market_groups" data-id="${group.id}"><i data-lucide="pencil"></i><span>Editar</span></button>
+                  <button class="action-link" type="button" data-action="delete" data-collection="market_groups" data-id="${group.id}"><i data-lucide="trash-2"></i><span>Excluir</span></button>
+                </span>
+              </div>
+            `,
+          )
+          .join("") || `<div class="empty-state compact">Nenhum grupo de mercado cadastrado.</div>`}
+      </div>
+      ${marketGroupForm(editingGroup || {})}
+      <div class="split-list">
+        ${state.data.marketHistory
+          .map(
+            (entry) => `
+              <div class="split-row">
+                <span><strong>${escapeHtml(monthLabel(entry.month))}</strong><span>${escapeHtml(entry.notes || "Histórico de mercado")}</span></span>
+                <span class="row-actions">
+                  <strong>${formatCurrency(entry.amount)}</strong>
+                  <button class="action-link" type="button" data-action="edit" data-collection="market_history" data-id="${entry.id}"><i data-lucide="pencil"></i><span>Editar</span></button>
+                  <button class="action-link" type="button" data-action="delete" data-collection="market_history" data-id="${entry.id}"><i data-lucide="trash-2"></i><span>Excluir</span></button>
+                </span>
+              </div>
+            `,
+          )
+          .join("") || `<div class="empty-state compact">Nenhum histórico de mercado cadastrado.</div>`}
+      </div>
+      ${marketHistoryForm(editingHistory || {})}
     </section>
   `;
 }
 
-function planningForm() {
+function marketGroupForm(record = {}) {
+  return `
+    <form class="record-form compact-form" id="marketGroupForm" data-form="market-group">
+      <label class="form-group wide"><span class="form-label">Grupo de mercado</span><input name="name" value="${escapeHtml(record.name || "")}" required /></label>
+      <label class="form-group"><span class="form-label">Previsão</span><input name="forecast" type="number" step="0.01" value="${escapeHtml(record.forecast || "")}" required /></label>
+      <div class="form-actions">
+        ${record.id ? `<button class="button ghost" type="button" data-action="cancel-edit" data-collection="market_groups"><i data-lucide="x"></i><span>Cancelar</span></button>` : ""}
+        <button class="button secondary" type="submit"><i data-lucide="save"></i><span>${record.id ? "Salvar grupo" : "Adicionar grupo"}</span></button>
+      </div>
+    </form>
+  `;
+}
+
+function marketHistoryForm(record = {}) {
+  return `
+    <form class="record-form compact-form" id="marketHistoryForm" data-form="market-history">
+      <label class="form-group"><span class="form-label">Mês</span><input name="month" type="month" value="${escapeHtml(record.month || state.month)}" required /></label>
+      <label class="form-group"><span class="form-label">Valor real</span><input name="amount" type="number" step="0.01" value="${escapeHtml(record.amount || "")}" required /></label>
+      <label class="form-group wide"><span class="form-label">Observações</span><input name="notes" value="${escapeHtml(record.notes || "")}" /></label>
+      <div class="form-actions">
+        ${record.id ? `<button class="button ghost" type="button" data-action="cancel-edit" data-collection="market_history"><i data-lucide="x"></i><span>Cancelar</span></button>` : ""}
+        <button class="button secondary" type="submit"><i data-lucide="save"></i><span>${record.id ? "Salvar histórico" : "Adicionar histórico"}</span></button>
+      </div>
+    </form>
+  `;
+}
+
+function planningForm(record = {}) {
   return `
     <form class="record-form" data-form="planning">
-      <label class="form-group"><span class="form-label">Grupo</span><select name="group">${options(planningGroups.map((group) => ({ value: group, label: titleCase(group) })))}</select></label>
-      <label class="form-group"><span class="form-label">Tipo</span><select name="type">${options([{ value: "income", label: "Receita" }, { value: "expense", label: "Despesa" }])}</select></label>
-      <label class="form-group wide"><span class="form-label">Nome</span><input name="name" required /></label>
-      <label class="form-group"><span class="form-label">Valor previsto</span><input name="amount" type="number" step="0.01" required /></label>
-      <label class="form-group"><span class="form-label">Dia</span><input name="day" type="number" min="1" max="31" required /></label>
-      <label class="form-group"><span class="form-label">Categoria</span><select name="categoryId">${categoryOptions()}</select></label>
-      <label class="form-group"><span class="form-label">Conta</span><select name="accountId">${accountOptions(state.data.settings.mainAccountId)}</select></label>
-      <label class="form-group"><span class="form-label">Pagamento</span><select name="paymentMethod">${options(paymentMethods)}</select></label>
-      <label class="form-group"><span class="form-label">Cartão</span><select name="cardId">${cardOptions("", true)}</select></label>
-      <label class="form-group full"><span class="form-label">Observações</span><textarea name="notes"></textarea></label>
-      <div class="form-actions"><button class="button" type="submit"><i data-lucide="save"></i><span>Salvar planejamento</span></button></div>
+      <label class="form-group"><span class="form-label">Grupo</span><select name="group">${options(planningGroups.map((group) => ({ value: group, label: titleCase(group) })), record.group || "expense")}</select></label>
+      <label class="form-group"><span class="form-label">Tipo</span><select name="type">${options([{ value: "income", label: "Receita" }, { value: "expense", label: "Despesa" }], record.type || "expense")}</select></label>
+      <label class="form-group wide"><span class="form-label">Nome</span><input name="name" value="${escapeHtml(record.name || "")}" required /></label>
+      <label class="form-group"><span class="form-label">Valor previsto</span><input name="amount" type="number" step="0.01" value="${escapeHtml(record.amount || "")}" required /></label>
+      <label class="form-group"><span class="form-label">Dia</span><input name="day" type="number" min="1" max="31" value="${escapeHtml(record.day || "")}" required /></label>
+      <label class="form-group"><span class="form-label">Categoria</span><select name="categoryId">${categoryOptions(record.categoryId || "")}</select></label>
+      <label class="form-group"><span class="form-label">Conta</span><select name="accountId">${accountOptions(record.accountId || state.data.settings.mainAccountId, true)}</select></label>
+      <label class="form-group"><span class="form-label">Pagamento</span><select name="paymentMethod">${options(paymentMethods, record.paymentMethod || "PIX")}</select></label>
+      <label class="form-group"><span class="form-label">Cartão</span><select name="cardId">${cardOptions(record.cardId || "", true)}</select></label>
+      <label class="form-group"><span class="form-label">Ativo</span><span class="checkbox-row"><input name="active" type="checkbox" ${record.active ?? true ? "checked" : ""} /><span>Sim</span></span></label>
+      <label class="form-group full"><span class="form-label">Observações</span><textarea name="notes">${escapeHtml(record.notes || "")}</textarea></label>
+      <div class="form-actions">
+        ${record.id ? `<button class="button ghost" type="button" data-action="cancel-edit" data-collection="planning_items"><i data-lucide="x"></i><span>Cancelar</span></button>` : ""}
+        <button class="button" type="submit"><i data-lucide="save"></i><span>${record.id ? "Salvar planejamento" : "Adicionar planejamento"}</span></button>
+      </div>
     </form>
   `;
 }
 
 function renderInvestments() {
   const finance = calculateFinance(state.data, state.month);
+  const editing = state.editing.investments ? state.data.investments.find((item) => item.id === state.editing.investments) : null;
   return `
     <section class="module-page">
       <section class="metric-grid">
@@ -1027,7 +1158,7 @@ function renderInvestments() {
       <section class="table-panel">
         <div class="table-header"><div><h3 class="table-title">Aplicações</h3><p class="table-subtitle">${state.data.investments.length} investimento(s)</p></div></div>
         <div class="table-wrap">
-          <table><thead><tr><th>Investimento</th><th>Tipo</th><th>Valor</th><th>Rend. est.</th><th>Rend. real</th><th>Liquidez</th></tr></thead>
+          <table><thead><tr><th>Investimento</th><th>Tipo</th><th>Valor</th><th>Rend. est.</th><th>Rend. real</th><th>Liquidez</th><th>Ações</th></tr></thead>
           <tbody>${state.data.investments
             .map(
               (item) => `
@@ -1038,17 +1169,47 @@ function renderInvestments() {
                   <td>${toNumber(item.estimatedYield).toFixed(2)}%</td>
                   <td>${toNumber(item.realYield).toFixed(2)}%</td>
                   <td>${escapeHtml(item.liquidity)}</td>
+                  <td><div class="row-actions">
+                    <button class="action-link" type="button" data-action="edit" data-collection="investments" data-id="${item.id}"><i data-lucide="pencil"></i><span>Editar</span></button>
+                    <button class="action-link" type="button" data-action="delete" data-collection="investments" data-id="${item.id}"><i data-lucide="trash-2"></i><span>Excluir</span></button>
+                  </div></td>
                 </tr>
               `,
             )
-            .join("")}</tbody></table>
+            .join("") || `<tr><td colspan="7">Nenhum investimento cadastrado.</td></tr>`}</tbody></table>
         </div>
+      </section>
+      <section class="form-panel" id="investmentForm">
+        <div class="panel-header"><div><h2 class="panel-title">${editing ? "Editar investimento" : "Novo investimento"}</h2><p class="panel-subtitle">Cadastre aplicações reais e acompanhe o patrimônio.</p></div></div>
+        ${investmentForm(editing || {})}
       </section>
     </section>
   `;
 }
 
+function investmentForm(record = {}) {
+  return `
+    <form class="record-form" data-form="investment">
+      <label class="form-group wide"><span class="form-label">Nome</span><input name="name" value="${escapeHtml(record.name || "")}" required /></label>
+      <label class="form-group"><span class="form-label">Tipo</span><input name="type" value="${escapeHtml(record.type || "Renda fixa")}" required /></label>
+      <label class="form-group"><span class="form-label">Valor</span><input name="amount" type="number" step="0.01" value="${escapeHtml(record.amount || "")}" required /></label>
+      <label class="form-group"><span class="form-label">Rend. estimado (%)</span><input name="estimatedYield" type="number" step="0.01" value="${escapeHtml(record.estimatedYield || "")}" /></label>
+      <label class="form-group"><span class="form-label">Rend. real (%)</span><input name="realYield" type="number" step="0.01" value="${escapeHtml(record.realYield || "")}" /></label>
+      <label class="form-group"><span class="form-label">Instituição</span><input name="institution" value="${escapeHtml(record.institution || "")}" /></label>
+      <label class="form-group"><span class="form-label">Liquidez</span><input name="liquidity" value="${escapeHtml(record.liquidity || "")}" /></label>
+      <label class="form-group"><span class="form-label">Aplicação</span><input name="applicationDate" type="date" value="${escapeHtml(record.applicationDate || "")}" /></label>
+      <label class="form-group"><span class="form-label">Vencimento</span><input name="maturityDate" type="date" value="${escapeHtml(record.maturityDate || "")}" /></label>
+      <label class="form-group full"><span class="form-label">Observações</span><textarea name="notes">${escapeHtml(record.notes || "")}</textarea></label>
+      <div class="form-actions">
+        ${record.id ? `<button class="button ghost" type="button" data-action="cancel-edit" data-collection="investments"><i data-lucide="x"></i><span>Cancelar</span></button>` : ""}
+        <button class="button" type="submit"><i data-lucide="save"></i><span>${record.id ? "Salvar investimento" : "Adicionar investimento"}</span></button>
+      </div>
+    </form>
+  `;
+}
+
 function renderCategories() {
+  const editing = state.editing.categories ? state.data.categories.find((category) => category.id === state.editing.categories) : null;
   return `
     <section class="module-page">
       <section class="category-grid">
@@ -1061,6 +1222,9 @@ function renderCategories() {
                   <strong>${escapeHtml(category.name)}</strong>
                   <span>${escapeHtml(titleCase(category.type))} · orçamento ${formatCurrency(category.budget)}</span>
                 </div>
+                <button class="action-link category-delete" type="button" data-action="edit" data-collection="categories" data-id="${category.id}" aria-label="Editar categoria ${escapeHtml(category.name)}">
+                  <i data-lucide="pencil"></i>
+                </button>
                 <button class="action-link category-delete" type="button" data-action="delete" data-collection="categories" data-id="${category.id}" aria-label="Excluir categoria ${escapeHtml(category.name)}">
                   <i data-lucide="trash-2"></i>
                 </button>
@@ -1069,17 +1233,26 @@ function renderCategories() {
           )
           .join("")}
       </section>
-      <section class="form-panel">
-        <div class="panel-header"><div><h2 class="panel-title">Nova categoria</h2><p class="panel-subtitle">Use categorias para orçamento e previsões automáticas.</p></div></div>
-        <form class="record-form" data-form="category">
-          <label class="form-group wide"><span class="form-label">Nome</span><input name="name" required /></label>
-          <label class="form-group"><span class="form-label">Tipo</span><select name="type">${options(["income", "expense", "investment", "mixed"].map((type) => ({ value: type, label: titleCase(type) })))}</select></label>
-          <label class="form-group"><span class="form-label">Orçamento mensal</span><input name="budget" type="number" step="0.01" /></label>
-          <label class="form-group"><span class="form-label">Cor</span><input name="color" type="color" value="#0f766e" /></label>
-          <div class="form-actions"><button class="button" type="submit"><i data-lucide="plus"></i><span>Adicionar</span></button></div>
-        </form>
+      <section class="form-panel" id="categoryForm">
+        <div class="panel-header"><div><h2 class="panel-title">${editing ? "Editar categoria" : "Nova categoria"}</h2><p class="panel-subtitle">Use categorias para orçamento e previsões automáticas.</p></div></div>
+        ${categoryForm(editing || {})}
       </section>
     </section>
+  `;
+}
+
+function categoryForm(record = {}) {
+  return `
+    <form class="record-form" data-form="category">
+      <label class="form-group wide"><span class="form-label">Nome</span><input name="name" value="${escapeHtml(record.name || "")}" required /></label>
+      <label class="form-group"><span class="form-label">Tipo</span><select name="type">${options(["income", "expense", "investment", "mixed"].map((type) => ({ value: type, label: titleCase(type) })), record.type || "expense")}</select></label>
+      <label class="form-group"><span class="form-label">Orçamento mensal</span><input name="budget" type="number" step="0.01" value="${escapeHtml(record.budget || "")}" /></label>
+      <label class="form-group"><span class="form-label">Cor</span><input name="color" type="color" value="${escapeHtml(record.color || "#0f766e")}" /></label>
+      <div class="form-actions">
+        ${record.id ? `<button class="button ghost" type="button" data-action="cancel-edit" data-collection="categories"><i data-lucide="x"></i><span>Cancelar</span></button>` : ""}
+        <button class="button" type="submit"><i data-lucide="save"></i><span>${record.id ? "Salvar categoria" : "Adicionar categoria"}</span></button>
+      </div>
+    </form>
   `;
 }
 
@@ -1186,7 +1359,8 @@ async function handleFormSubmit(form) {
 
   if (kind === "transaction") {
     const editingId = state.editing.transactions;
-    const payload = toDbTransaction(normalizeTransaction(raw), householdId, userId);
+    const previous = editingId ? state.data.transactions.find((item) => item.id === editingId) : {};
+    const payload = toDbTransaction(normalizeTransaction(raw, previous), householdId, userId);
     if (editingId) {
       await updateRemote("transactions", editingId, payload);
       state.editing.transactions = "";
@@ -1217,8 +1391,34 @@ async function handleFormSubmit(form) {
     await persist("Compra adicionada ao cartão.");
   }
 
+  if (kind === "card") {
+    const editingId = state.editing.cards;
+    const previous = editingId ? state.data.cards.find((item) => item.id === editingId) : {};
+    const payload = toDbCard({
+      ...previous,
+      name: raw.name.trim(),
+      accountId: raw.accountId || "",
+      limitTotal: toNumber(raw.limitTotal),
+      closingDay: Math.max(1, Math.min(31, toNumber(raw.closingDay))),
+      dueDay: Math.max(1, Math.min(31, toNumber(raw.dueDay))),
+      status: raw.status || "aberta",
+      notes: raw.notes?.trim() || "",
+    }, householdId, userId);
+    if (editingId) {
+      await updateRemote("cards", editingId, payload);
+      state.editing.cards = "";
+      await persist("Cartão atualizado.");
+    } else {
+      await insertRemote("cards", payload);
+      await persist("Cartão criado.");
+    }
+  }
+
   if (kind === "planning") {
-    await insertRemote("planning_items", toDbPlanning({
+    const editingId = state.editing.planning_items;
+    const previous = editingId ? state.data.planningItems.find((item) => item.id === editingId) : {};
+    const payload = toDbPlanning({
+      ...previous,
       group: raw.group,
       type: raw.type,
       name: raw.name.trim(),
@@ -1229,32 +1429,122 @@ async function handleFormSubmit(form) {
       accountId: raw.accountId,
       paymentMethod: raw.paymentMethod,
       cardId: raw.cardId || "",
-      active: true,
+      active: Boolean(raw.active),
       notes: raw.notes?.trim() || "",
-    }, householdId, userId));
-    await persist("Planejamento recorrente criado.");
+    }, householdId, userId);
+    if (editingId) {
+      await updateRemote("planning_items", editingId, payload);
+      state.editing.planning_items = "";
+      await persist("Planejamento atualizado.");
+    } else {
+      await insertRemote("planning_items", payload);
+      await persist("Planejamento recorrente criado.");
+    }
   }
 
   if (kind === "account") {
-    await insertRemote("accounts", toDbAccount({
+    const editingId = state.editing.accounts;
+    const previous = editingId ? state.data.accounts.find((item) => item.id === editingId) : {};
+    const payload = toDbAccount({
+      ...previous,
       name: raw.name.trim(),
       institution: raw.institution?.trim() || raw.name.trim(),
       type: raw.type?.trim() || "Conta secundária",
       balance: toNumber(raw.balance),
       isPrimary: Boolean(raw.isPrimary),
       notes: raw.notes?.trim() || "",
-    }, householdId, userId));
-    await persist("Conta adicionada.");
+    }, householdId, userId);
+    if (editingId) {
+      await updateRemote("accounts", editingId, payload);
+      state.editing.accounts = "";
+      await persist("Conta atualizada.");
+    } else {
+      await insertRemote("accounts", payload);
+      await persist("Conta adicionada.");
+    }
   }
 
   if (kind === "category") {
-    await insertRemote("categories", toDbCategory({
+    const editingId = state.editing.categories;
+    const previous = editingId ? state.data.categories.find((item) => item.id === editingId) : {};
+    const payload = toDbCategory({
+      ...previous,
       name: raw.name.trim(),
       type: raw.type,
       color: raw.color || "#0f766e",
       budget: toNumber(raw.budget),
-    }, householdId, userId));
-    await persist("Categoria adicionada.");
+    }, householdId, userId);
+    if (editingId) {
+      await updateRemote("categories", editingId, payload);
+      state.editing.categories = "";
+      await persist("Categoria atualizada.");
+    } else {
+      await insertRemote("categories", payload);
+      await persist("Categoria adicionada.");
+    }
+  }
+
+  if (kind === "investment") {
+    const editingId = state.editing.investments;
+    const previous = editingId ? state.data.investments.find((item) => item.id === editingId) : {};
+    const payload = toDbInvestment({
+      ...previous,
+      name: raw.name.trim(),
+      type: raw.type.trim(),
+      amount: toNumber(raw.amount),
+      estimatedYield: toNumber(raw.estimatedYield),
+      realYield: toNumber(raw.realYield),
+      applicationDate: raw.applicationDate || "",
+      maturityDate: raw.maturityDate || "",
+      institution: raw.institution?.trim() || "",
+      liquidity: raw.liquidity?.trim() || "",
+      notes: raw.notes?.trim() || "",
+    }, householdId, userId);
+    if (editingId) {
+      await updateRemote("investments", editingId, payload);
+      state.editing.investments = "";
+      await persist("Investimento atualizado.");
+    } else {
+      await insertRemote("investments", payload);
+      await persist("Investimento adicionado.");
+    }
+  }
+
+  if (kind === "market-group") {
+    const editingId = state.editing.market_groups;
+    const previous = editingId ? state.data.marketGroups.find((item) => item.id === editingId) : {};
+    const payload = toDbMarketGroup({
+      ...previous,
+      name: raw.name.trim(),
+      forecast: toNumber(raw.forecast),
+    }, householdId, userId);
+    if (editingId) {
+      await updateRemote("market_groups", editingId, payload);
+      state.editing.market_groups = "";
+      await persist("Grupo de mercado atualizado.");
+    } else {
+      await insertRemote("market_groups", payload);
+      await persist("Grupo de mercado adicionado.");
+    }
+  }
+
+  if (kind === "market-history") {
+    const editingId = state.editing.market_history;
+    const previous = editingId ? state.data.marketHistory.find((item) => item.id === editingId) : {};
+    const payload = toDbMarketHistory({
+      ...previous,
+      month: raw.month,
+      amount: toNumber(raw.amount),
+      notes: raw.notes?.trim() || "",
+    }, householdId, userId);
+    if (editingId) {
+      await updateRemote("market_history", editingId, payload);
+      state.editing.market_history = "";
+      await persist("Histórico de mercado atualizado.");
+    } else {
+      await insertRemote("market_history", payload);
+      await persist("Histórico de mercado adicionado.");
+    }
   }
 
   if (kind === "settings") {
@@ -1360,7 +1650,17 @@ appRoot.addEventListener("click", async (event) => {
   if (action === "edit") {
     state.editing[target.dataset.collection] = target.dataset.id;
     render();
-    window.setTimeout(() => document.querySelector("#transactionForm")?.scrollIntoView({ behavior: "smooth" }), 0);
+    const formTargets = {
+      transactions: "#transactionForm",
+      accounts: "#accountForm",
+      cards: "#cardForm",
+      planning_items: "#planningForm",
+      categories: "#categoryForm",
+      investments: "#investmentForm",
+      market_groups: "#marketGroupForm",
+      market_history: "#marketHistoryForm",
+    };
+    window.setTimeout(() => document.querySelector(formTargets[target.dataset.collection] || ".form-panel")?.scrollIntoView({ behavior: "smooth" }), 0);
   }
 
   if (action === "cancel-edit") {
@@ -1377,11 +1677,23 @@ appRoot.addEventListener("click", async (event) => {
       await persist("Registro excluído.");
     } catch (error) {
       console.error(error);
-      if (collection === "categories" && error.code === "23503") {
-        showToast("Categoria em uso. Remova ou altere os registros vinculados antes de excluir.");
+      if (error.code === "23503") {
+        showToast("Registro em uso. Remova ou altere os vínculos antes de excluir.");
       } else {
         showToast(error.message || "Não foi possível excluir.");
       }
+    }
+  }
+
+  if (action === "toggle-active") {
+    const item = state.data.planningItems.find((plan) => plan.id === target.dataset.id);
+    if (!item) return;
+    try {
+      await updateRemote("planning_items", item.id, toDbPlanning({ ...item, active: !item.active }, state.householdId, state.user.id));
+      await persist(item.active ? "Planejamento desativado." : "Planejamento ativado.");
+    } catch (error) {
+      console.error(error);
+      showToast(error.message || "Não foi possível alterar o planejamento.");
     }
   }
 

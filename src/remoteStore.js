@@ -362,7 +362,7 @@ export function toDbTransaction(transaction, householdId, userId) {
     current_installment: transaction.currentInstallment || 1,
     status: transaction.status || "confirmed",
     notes: transaction.notes || "",
-    created_by: userId,
+    created_by: transaction.createdBy || userId,
   };
 }
 
@@ -381,7 +381,7 @@ export function toDbPlanning(item, householdId, userId) {
     payment_method: item.paymentMethod,
     active: item.active ?? true,
     notes: item.notes || "",
-    created_by: userId,
+    created_by: item.createdBy || userId,
   };
 }
 
@@ -394,7 +394,7 @@ export function toDbAccount(item, householdId, userId) {
     balance: item.balance,
     is_primary: item.isPrimary || false,
     notes: item.notes || "",
-    created_by: userId,
+    created_by: item.createdBy || userId,
   };
 }
 
@@ -405,7 +405,57 @@ export function toDbCategory(item, householdId, userId) {
     type: item.type,
     color: item.color,
     monthly_budget: item.budget || 0,
-    created_by: userId,
+    created_by: item.createdBy || userId,
+  };
+}
+
+export function toDbCard(item, householdId, userId) {
+  return {
+    household_id: householdId,
+    account_id: item.accountId || null,
+    name: item.name,
+    limit_total: item.limitTotal,
+    closing_day: item.closingDay,
+    due_day: item.dueDay,
+    status: statusToDb(item.status),
+    notes: item.notes || "",
+    created_by: item.createdBy || userId,
+  };
+}
+
+export function toDbInvestment(item, householdId, userId) {
+  return {
+    household_id: householdId,
+    name: item.name,
+    type: item.type,
+    amount: item.amount,
+    estimated_yield: item.estimatedYield,
+    real_yield: item.realYield,
+    application_date: item.applicationDate || null,
+    maturity_date: item.maturityDate || null,
+    institution: item.institution || "",
+    liquidity: item.liquidity || "",
+    notes: item.notes || "",
+    created_by: item.createdBy || userId,
+  };
+}
+
+export function toDbMarketGroup(item, householdId, userId) {
+  return {
+    household_id: householdId,
+    name: item.name,
+    forecast: item.forecast,
+    created_by: item.createdBy || userId,
+  };
+}
+
+export function toDbMarketHistory(item, householdId, userId) {
+  return {
+    household_id: householdId,
+    month: monthDate(item.month),
+    amount: item.amount,
+    notes: item.notes || "",
+    created_by: item.createdBy || userId,
   };
 }
 
@@ -433,6 +483,7 @@ function fromCategory(row) {
     type: row.type,
     color: row.color,
     budget: money(row.monthly_budget),
+    createdBy: row.created_by,
   };
 }
 
@@ -445,6 +496,7 @@ function fromAccount(row) {
     balance: money(row.balance),
     isPrimary: row.is_primary,
     notes: row.notes,
+    createdBy: row.created_by,
   };
 }
 
@@ -458,6 +510,7 @@ function fromCard(row) {
     dueDay: row.due_day,
     status: statusFromDb(row.status),
     notes: row.notes,
+    createdBy: row.created_by,
   };
 }
 
@@ -476,6 +529,7 @@ function fromPlanningItem(row) {
     paymentMethod: row.payment_method,
     active: row.active,
     notes: row.notes,
+    createdBy: row.created_by,
   };
 }
 
@@ -506,6 +560,7 @@ function fromMarketGroup(row) {
     id: row.id,
     name: row.name,
     forecast: money(row.forecast),
+    createdBy: row.created_by,
   };
 }
 
@@ -515,6 +570,7 @@ function fromMarketHistory(row) {
     month: monthText(row.month),
     amount: money(row.amount),
     notes: row.notes,
+    createdBy: row.created_by,
   };
 }
 
@@ -531,6 +587,7 @@ function fromInvestment(row) {
     institution: row.institution,
     liquidity: row.liquidity,
     notes: row.notes,
+    createdBy: row.created_by,
   };
 }
 

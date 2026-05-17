@@ -1318,7 +1318,7 @@ tr:hover td {
 
 .category-chip-card {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
   gap: 12px;
   align-items: center;
   padding: 14px;
@@ -1330,6 +1330,18 @@ tr:hover td {
   justify-content: center;
   padding: 6px;
   color: var(--danger);
+}
+
+.form-helper {
+  color: var(--muted);
+  font-size: 0.84rem;
+  font-weight: 750;
+}
+
+.compact-form {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
 }
 
 .category-chip-card strong,
