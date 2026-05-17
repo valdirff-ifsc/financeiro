@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Financeiro Pessoal</title>
+    <meta
+      name="description"
+      content="Sistema pessoal de controle financeiro com dashboard, cartões, contas, despesas, mercado, dívidas, receitas e investimentos."
+    />
+    <meta name="theme-color" content="#0f766e" />
+    <meta name="application-name" content="Financeiro" />
+    <meta name="apple-mobile-web-app-title" content="Financeiro" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/assets/icons/icon-192.png" />
+    <link rel="apple-touch-icon" href="/assets/icons/icon-192.png" />
+    <link rel="stylesheet" href="styles/main.css" />
+    <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js" defer></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" id="sidebar">
+        <div class="brand">
+          <div class="brand-mark">FP</div>
+          <div>
+            <strong>Financeiro</strong>
+            <span>controle pessoal</span>
+          </div>
+        </div>
+        <nav class="nav-list" id="sidebarNav" aria-label="Navegação principal"></nav>
+      </aside>
+
+      <div class="main-shell">
+        <header class="topbar">
+          <button class="icon-button mobile-only" id="menuToggle" type="button" aria-label="Abrir menu">
+            <i data-lucide="menu"></i>
+          </button>
+
+          <div class="page-heading">
+            <span id="pageEyebrow">Sistema financeiro pessoal</span>
+            <h1 id="pageTitle">Dashboard</h1>
+          </div>
+
+          <div class="topbar-actions month-toolbar" aria-label="Controle do mês analisado">
+            <button class="icon-button month-nav" id="monthPrev" type="button" aria-label="Mês anterior">
+              <i data-lucide="chevron-left"></i>
+            </button>
+
+            <div class="month-control">
+              <span>Mês em análise</span>
+              <div class="month-fields">
+                <select id="monthSelect" aria-label="Mês"></select>
+                <input id="yearInput" type="number" min="2000" max="2100" aria-label="Ano" />
+              </div>
+            </div>
+
+            <button class="icon-button month-nav" id="monthNext" type="button" aria-label="Próximo mês">
+              <i data-lucide="chevron-right"></i>
+            </button>
+
+            <button class="button secondary month-today" id="monthToday" type="button">
+              <i data-lucide="calendar-check"></i>
+              <span>Este mês</span>
+            </button>
+            <input id="importFile" type="file" accept="application/json" hidden />
+          </div>
+        </header>
+
+        <main class="content" id="appRoot" tabindex="-1"></main>
+      </div>
+    </div>
+
+    <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+    <script type="module" src="src/app.js"></script>
+    <script>
+      if ("serviceWorker" in navigator) {
+        window.addEventListener("load", () => {
+          navigator.serviceWorker.register("/sw.js").catch((error) => {
+            console.warn("Service worker não registrado.", error);
+          });
+        });
+      }
+    </script>
+  </body>
+</html>
