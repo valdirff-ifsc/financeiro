@@ -64,10 +64,10 @@ export function donutChart(items, options = {}) {
   return `
     <div class="chart">
       <svg viewBox="0 0 220 220" role="img" aria-label="${escapeHtml(options.label || "Gráfico de rosca")}">
-        <circle cx="110" cy="110" r="${radius}" fill="transparent" stroke="#e7eeeb" stroke-width="28" />
+        <circle cx="110" cy="110" r="${radius}" fill="transparent" stroke="var(--chart-line)" stroke-width="28" />
         <g transform="rotate(-90 110 110)">${circles}</g>
-        <text x="110" y="104" text-anchor="middle" font-size="17" font-weight="800" fill="#1f2933">${escapeHtml(options.centerLabel || "Total")}</text>
-        <text x="110" y="128" text-anchor="middle" font-size="16" font-weight="700" fill="#65727e">${escapeHtml(formatCurrency(total))}</text>
+        <text x="110" y="104" text-anchor="middle" font-size="17" font-weight="800" fill="var(--chart-text)">${escapeHtml(options.centerLabel || "Total")}</text>
+        <text x="110" y="128" text-anchor="middle" font-size="16" font-weight="700" fill="var(--chart-muted)">${escapeHtml(formatCurrency(total))}</text>
       </svg>
       ${legend(filtered.slice(0, options.legendLimit || 6))}
     </div>
@@ -96,8 +96,8 @@ export function barChart(items, options = {}) {
       const label = String(item.label || "").length > 14 ? `${String(item.label).slice(0, 13)}...` : item.label;
       return `
         <rect x="${x}" y="${y}" width="${barWidth}" height="${barHeight}" rx="6" fill="${item.color || fallbackColors[index % fallbackColors.length]}" />
-        <text x="${x + barWidth / 2}" y="${height - 30}" text-anchor="middle" font-size="12" fill="#65727e">${escapeHtml(label)}</text>
-        <text x="${x + barWidth / 2}" y="${Math.max(18, y - 7)}" text-anchor="middle" font-size="11" font-weight="700" fill="#1f2933">${escapeHtml(formatCurrency(value))}</text>
+        <text x="${x + barWidth / 2}" y="${height - 30}" text-anchor="middle" font-size="12" fill="var(--chart-muted)">${escapeHtml(label)}</text>
+        <text x="${x + barWidth / 2}" y="${Math.max(18, y - 7)}" text-anchor="middle" font-size="11" font-weight="700" fill="var(--chart-text)">${escapeHtml(formatCurrency(value))}</text>
       `;
     })
     .join("");
@@ -105,7 +105,7 @@ export function barChart(items, options = {}) {
   return `
     <div class="chart">
       <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(options.label || "Gráfico de barras")}">
-        <line x1="${padding.left}" y1="${padding.top + plotHeight}" x2="${width - padding.right}" y2="${padding.top + plotHeight}" stroke="#dbe3df" />
+        <line x1="${padding.left}" y1="${padding.top + plotHeight}" x2="${width - padding.right}" y2="${padding.top + plotHeight}" stroke="var(--chart-line)" />
         ${bars}
       </svg>
     </div>
@@ -134,7 +134,7 @@ export function groupedBarChart(items, options = {}) {
       return `
         <rect x="${x - barWidth - 2}" y="${baseY - incomeHeight}" width="${barWidth}" height="${incomeHeight}" rx="5" fill="#248a55" />
         <rect x="${x + 2}" y="${baseY - expenseHeight}" width="${barWidth}" height="${expenseHeight}" rx="5" fill="#d95f48" />
-        <text x="${x}" y="${height - 30}" text-anchor="middle" font-size="12" fill="#65727e">${escapeHtml(item.label)}</text>
+        <text x="${x}" y="${height - 30}" text-anchor="middle" font-size="12" fill="var(--chart-muted)">${escapeHtml(item.label)}</text>
       `;
     })
     .join("");
@@ -142,7 +142,7 @@ export function groupedBarChart(items, options = {}) {
   return `
     <div class="chart">
       <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(options.label || "Receitas e despesas")}">
-        <line x1="${padding.left}" y1="${padding.top + plotHeight}" x2="${width - padding.right}" y2="${padding.top + plotHeight}" stroke="#dbe3df" />
+        <line x1="${padding.left}" y1="${padding.top + plotHeight}" x2="${width - padding.right}" y2="${padding.top + plotHeight}" stroke="var(--chart-line)" />
         ${bars}
       </svg>
       <div class="legend">
@@ -178,13 +178,13 @@ export function lineChart(items, options = {}) {
   return `
     <div class="chart">
       <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(options.label || "Evolução")}">
-        <line x1="${padding.left}" y1="${padding.top + plotHeight}" x2="${width - padding.right}" y2="${padding.top + plotHeight}" stroke="#dbe3df" />
+        <line x1="${padding.left}" y1="${padding.top + plotHeight}" x2="${width - padding.right}" y2="${padding.top + plotHeight}" stroke="var(--chart-line)" />
         <path d="${path}" fill="none" stroke="${options.color || "#0f766e"}" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" />
         ${points
           .map(
             (point) => `
               <circle cx="${point.x}" cy="${point.y}" r="5" fill="${options.color || "#0f766e"}" />
-              <text x="${point.x}" y="${height - 29}" text-anchor="middle" font-size="12" fill="#65727e">${escapeHtml(point.label)}</text>
+              <text x="${point.x}" y="${height - 29}" text-anchor="middle" font-size="12" fill="var(--chart-muted)">${escapeHtml(point.label)}</text>
             `,
           )
           .join("")}

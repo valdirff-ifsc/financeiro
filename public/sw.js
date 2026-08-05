@@ -1,4 +1,4 @@
-const CACHE_NAME = "financeiro-pwa-v1";
+const CACHE_NAME = "financeiro-pwa-v7-menu";
 
 const APP_SHELL = [
   "/",
@@ -41,6 +41,7 @@ self.addEventListener("activate", (event) => {
 self.addEventListener("fetch", (event) => {
   const { request } = event;
   if (request.method !== "GET") return;
+  const url = new URL(request.url);
 
   if (request.mode === "navigate") {
     event.respondWith(
@@ -51,6 +52,21 @@ self.addEventListener("fetch", (event) => {
           return response;
         })
         .catch(() => caches.match("/index.html")),
+    );
+    return;
+  }
+
+  if (url.origin === self.location.origin) {
+    event.respondWith(
+      fetch(request)
+        .then((response) => {
+          if (response.ok) {
+            const copy = response.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
+          }
+          return response;
+        })
+        .catch(() => caches.match(request)),
     );
     return;
   }

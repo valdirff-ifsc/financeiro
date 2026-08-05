@@ -68,7 +68,7 @@ export async function loadRemoteData(user) {
     .order("created_at", { ascending: true });
   const memberships = mustResponse(membershipResponse);
 
-  let householdId = memberships?.[0]?.household_id;
+  let householdId = await resolveHouseholdId(user, memberships);
   if (!householdId) {
     householdId = await createSeededHousehold(user);
   }
@@ -130,6 +130,32 @@ export async function loadRemoteData(user) {
     },
     householdId,
   };
+}
+
+async function resolveHouseholdId(user, memberships) {
+  if (memberships?.length === 1) return memberships[0].household_id;
+
+  if (memberships?.length > 1) {
+    const ids = memberships.map((membership) => membership.household_id);
+    const { data, error } = await supabase
+      .from("transactions")
+      .select("household_id")
+      .in("household_id", ids)
+      .limit(1);
+    if (error) throw error;
+    const activeId = data?.[0]?.household_id;
+    if (activeId) return activeId;
+    return memberships[0].household_id;
+  }
+
+  const householdResponse = await supabase
+    .from("households")
+    .select("id")
+    .eq("created_by", user.id)
+    .order("created_at", { ascending: true })
+    .limit(1)
+    .maybeSingle();
+  return must(householdResponse.data, householdResponse.error)?.id || "";
 }
 
 async function fetchRows(table, householdId, orderColumn = "created_at") {
