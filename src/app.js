@@ -1,5 +1,5 @@
 import { defaultData } from "./data.js";
-import { exportData } from "./storage.js";
+import { exportData, loadData, saveData } from "./storage.js";
 import {
   deleteRemote,
   getSessionUser,
@@ -35,20 +35,35 @@ import {
   getCategoryColor,
   getCategoryName,
   monthLabel,
+  monthDistance,
   normalize,
+  firstCardInvoiceMonth,
+  parseFinanceMeta,
   toNumber,
+  withFinanceMeta,
 } from "./calculations.js";
 import { barChart, comparisonBars, donutChart, groupedBarChart, lineChart } from "./charts.js";
 
 const appRoot = document.querySelector("#appRoot");
 const sidebar = document.querySelector("#sidebar");
 const sidebarNav = document.querySelector("#sidebarNav");
+const menuToggle = document.querySelector("#menuToggle");
+const sidebarClose = document.querySelector("#sidebarClose");
+const sidebarBackdrop = document.querySelector("#sidebarBackdrop");
 const pageTitle = document.querySelector("#pageTitle");
 const pageEyebrow = document.querySelector("#pageEyebrow");
 const monthSelect = document.querySelector("#monthSelect");
 const yearInput = document.querySelector("#yearInput");
 const importFile = document.querySelector("#importFile");
 const toast = document.querySelector("#toast");
+const modalRoot = document.querySelector("#modalRoot");
+const quickAddButton = document.querySelector("#quickAddButton");
+const LOCAL_AUTH_BYPASS = false;
+const localUser = {
+  id: "local-user",
+  email: "local@financeiro.app",
+  user_metadata: { display_name: "Modo local" },
+};
 
 const state = {
   data: defaultData,
@@ -61,7 +76,12 @@ const state = {
   user: null,
   householdId: "",
   unsubscribeRealtime: null,
+  quickAddOpen: false,
+  quickAddPreset: null,
 };
+
+let pendingScrollRestore = null;
+let activeInitialization = null;
 
 function setRoute(route, updateHash = true) {
   state.route = route || "dashboard";
@@ -81,21 +101,50 @@ function resetAuthenticatedState() {
 }
 
 async function initializeForUser(user, options = {}) {
-  state.user = user;
-  const remote = await loadRemoteData(user);
-  state.data = remote.data;
-  state.householdId = remote.householdId;
-  if (state.unsubscribeRealtime) state.unsubscribeRealtime();
-  state.unsubscribeRealtime = subscribeToHousehold(state.householdId, async () => {
-    await reloadRemote();
+  if (LOCAL_AUTH_BYPASS) {
+    state.user = localUser;
+    state.data = loadData();
+    state.householdId = "local-household";
+    state.authReady = true;
+    if (options.redirectToDashboard) setRoute("dashboard", true);
     render();
-  });
-  if (options.redirectToDashboard) setRoute("dashboard", true);
-  state.authReady = true;
-  render();
+    return;
+  }
+
+  if (activeInitialization?.userId === user.id) return activeInitialization.promise;
+  const promise = (async () => {
+    state.user = user;
+    const remote = await loadRemoteData(user);
+    state.data = remote.data;
+    state.householdId = remote.householdId;
+    if (state.unsubscribeRealtime) state.unsubscribeRealtime();
+    state.unsubscribeRealtime = subscribeToHousehold(state.householdId, async () => {
+      await reloadRemote();
+      render();
+      restoreScrollState(pendingScrollRestore);
+    });
+    if (options.redirectToDashboard) setRoute("dashboard", true);
+    state.authReady = true;
+    render();
+  })();
+  activeInitialization = { userId: user.id, promise };
+  try {
+    return await promise;
+  } finally {
+    if (activeInitialization?.promise === promise) activeInitialization = null;
+  }
 }
 
 async function bootstrap() {
+  if (LOCAL_AUTH_BYPASS) {
+    state.user = localUser;
+    state.data = loadData();
+    state.householdId = "local-household";
+    state.authReady = true;
+    render();
+    return;
+  }
+
   try {
     const user = await getSessionUser();
     if (user) {
@@ -114,15 +163,12 @@ async function bootstrap() {
 }
 
 const navItems = [
-  { route: "dashboard", label: "Dashboard", icon: "layout-dashboard" },
-  { route: "pending", label: "Pendências do mês", icon: "list-checks" },
-  { route: "transactions", label: "Movimentações", icon: "arrow-left-right" },
-  { route: "accounts", label: "Contas bancárias", icon: "landmark" },
-  { route: "cards", label: "Cartões", icon: "credit-card" },
-  { route: "planning", label: "Planejamento", icon: "calendar-clock" },
-  { route: "investments", label: "Investimentos", icon: "trending-up" },
-  { route: "categories", label: "Categorias", icon: "tags" },
-  { route: "settings", label: "Configurações", icon: "settings" },
+  { route: "dashboard", label: "Hoje", icon: "layout-dashboard" },
+  { route: "pending", label: "A fazer", icon: "list-checks" },
+  { route: "future", label: "Futuro", icon: "calendar-range" },
+  { route: "history", label: "Histórico", icon: "chart-no-axes-combined" },
+  { route: "goals", label: "Metas", icon: "target" },
+  { route: "registrations", label: "Cadastros", icon: "settings-2" },
 ];
 
 const paymentMethods = ["PIX", "Cartão crédito", "Cartão débito", "Boleto", "Dinheiro", "Transferência", "Outro"];
@@ -152,6 +198,49 @@ function escapeHtml(value) {
     .replace(/'/g, "&#039;");
 }
 
+function visibleNotes(notes) {
+  return String(notes || "")
+    .split("\n")
+    .filter((line) => !line.startsWith("financeiro-meta:"))
+    .join("\n")
+    .trim();
+}
+
+function loanSummary(data = state.data) {
+  const people = new Map();
+  data.transactions.forEach((transaction) => {
+    const meta = parseFinanceMeta(transaction.notes);
+    if (meta.kind !== "loan" || !meta.personKey) return;
+    const current = people.get(meta.personKey) || {
+      personKey: meta.personKey,
+      personName: meta.personName || "Pessoa",
+      lent: 0,
+      repaid: 0,
+      balance: 0,
+      lastDate: "",
+      lastLendDate: "",
+      dueDate: "",
+      movements: 0,
+    };
+    const amount = toNumber(transaction.amount);
+    if (meta.action === "lend") current.lent += amount;
+    if (meta.action === "repayment") current.repaid += amount;
+    current.balance = current.lent - current.repaid;
+    current.lastDate = String(transaction.date || "") > current.lastDate ? transaction.date : current.lastDate;
+    if (meta.action === "lend" && String(transaction.date || "") >= current.lastLendDate) {
+      current.lastLendDate = transaction.date || "";
+      current.dueDate = meta.dueDate || "";
+    }
+    current.movements += 1;
+    people.set(meta.personKey, current);
+  });
+  const borrowers = [...people.values()].filter((person) => person.balance > 0.005).sort((a, b) => b.balance - a.balance);
+  return {
+    borrowers,
+    totalReceivable: borrowers.reduce((total, person) => total + person.balance, 0),
+  };
+}
+
 function uid(prefix = "id") {
   return crypto.randomUUID ? crypto.randomUUID() : `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
@@ -173,6 +262,40 @@ function titleCase(value) {
 
 function refreshIcons() {
   if (window.lucide?.createIcons) window.lucide.createIcons();
+}
+
+function captureScrollState(anchor) {
+  return {
+    windowX: window.scrollX,
+    windowY: window.scrollY,
+    anchorSelector: anchor?.dataset?.action
+      ? `[data-action="${anchor.dataset.action}"][data-collection="${anchor.dataset.collection || ""}"][data-id="${anchor.dataset.id || ""}"]`
+      : "",
+    anchorTop: anchor?.getBoundingClientRect?.().top ?? null,
+    containers: [".transactions-list-panel .table-wrap", ".planning-scroll", ".pending-list"].flatMap((selector) =>
+      Array.from(document.querySelectorAll(selector)).map((element, index) => ({
+        selector,
+        index,
+        left: element.scrollLeft,
+        top: element.scrollTop,
+      })),
+    ),
+  };
+}
+
+function restoreScrollState(snapshot) {
+  if (!snapshot) return;
+  window.scrollTo(snapshot.windowX, snapshot.windowY);
+  snapshot.containers.forEach((item) => {
+    const element = document.querySelectorAll(item.selector)[item.index];
+    if (!element) return;
+    element.scrollLeft = item.left;
+    element.scrollTop = item.top;
+  });
+  if (snapshot.anchorSelector && snapshot.anchorTop !== null) {
+    const anchor = document.querySelector(snapshot.anchorSelector);
+    if (anchor) window.scrollBy(0, anchor.getBoundingClientRect().top - snapshot.anchorTop);
+  }
 }
 
 function showToast(message) {
@@ -200,9 +323,178 @@ async function reloadRemote() {
 }
 
 async function persist(message) {
+  const scrollState = pendingScrollRestore || captureScrollState();
+  if (LOCAL_AUTH_BYPASS) {
+    saveData(state.data);
+    render();
+    restoreScrollState(scrollState);
+    window.setTimeout(() => {
+      if (pendingScrollRestore === scrollState) pendingScrollRestore = null;
+    }, 900);
+    showToast(message);
+    return;
+  }
+
   await reloadRemote();
   render();
+  restoreScrollState(scrollState);
+  window.setTimeout(() => {
+    if (pendingScrollRestore === scrollState) pendingScrollRestore = null;
+  }, 900);
   showToast(message);
+}
+
+const tableCollections = {
+  accounts: "accounts",
+  cards: "cards",
+  categories: "categories",
+  investments: "investments",
+  market_groups: "marketGroups",
+  market_history: "marketHistory",
+  planning_items: "planningItems",
+  transactions: "transactions",
+};
+
+function localCardStatus(status) {
+  return { open: "aberta", closed: "fechada", paid: "paga", late: "atrasada" }[status] || status || "aberta";
+}
+
+function localMonthText(date) {
+  return String(date || "").slice(0, 7);
+}
+
+function localFromDb(table, row) {
+  const value = (item) => Number(item || 0);
+  const converters = {
+    accounts: () => ({
+      id: row.id,
+      name: row.name,
+      institution: row.institution,
+      type: row.type,
+      balance: value(row.balance),
+      isPrimary: Boolean(row.is_primary),
+      notes: row.notes || "",
+      createdBy: row.created_by,
+    }),
+    cards: () => ({
+      id: row.id,
+      accountId: row.account_id || "",
+      name: row.name,
+      limitTotal: value(row.limit_total),
+      closingDay: row.closing_day,
+      dueDay: row.due_day,
+      status: localCardStatus(row.status),
+      notes: row.notes || "",
+      createdBy: row.created_by,
+    }),
+    categories: () => ({
+      id: row.id,
+      name: row.name,
+      type: row.type,
+      color: row.color,
+      budget: value(row.monthly_budget),
+      createdBy: row.created_by,
+    }),
+    investments: () => ({
+      id: row.id,
+      name: row.name,
+      type: row.type,
+      amount: value(row.amount),
+      estimatedYield: value(row.estimated_yield),
+      realYield: value(row.real_yield),
+      applicationDate: row.application_date || "",
+      maturityDate: row.maturity_date || "",
+      institution: row.institution || "",
+      liquidity: row.liquidity || "",
+      notes: row.notes || "",
+      createdBy: row.created_by,
+    }),
+    market_groups: () => ({
+      id: row.id,
+      name: row.name,
+      forecast: value(row.forecast),
+      createdBy: row.created_by,
+    }),
+    market_history: () => ({
+      id: row.id,
+      month: localMonthText(row.month),
+      amount: value(row.amount),
+      notes: row.notes || "",
+      createdBy: row.created_by,
+    }),
+    planning_items: () => ({
+      id: row.id,
+      group: row.group_key,
+      type: row.type,
+      name: row.name,
+      amount: value(row.amount),
+      recurrence: row.recurrence,
+      day: row.due_day,
+      categoryId: row.category_id || "",
+      accountId: row.account_id || "",
+      cardId: row.card_id || "",
+      paymentMethod: row.payment_method,
+      active: row.active,
+      notes: row.notes || "",
+      createdBy: row.created_by,
+    }),
+    transactions: () => ({
+      id: row.id,
+      type: row.type,
+      description: row.description,
+      amount: value(row.amount),
+      date: row.transaction_date,
+      categoryId: row.category_id || "",
+      accountId: row.account_id || "",
+      fromAccountId: row.from_account_id || "",
+      toAccountId: row.to_account_id || "",
+      cardId: row.card_id || "",
+      linkedPlanningId: row.planning_item_id || "",
+      paymentMethod: row.payment_method,
+      installments: row.installments,
+      currentInstallment: row.current_installment,
+      status: row.status,
+      notes: row.notes || "",
+      createdBy: row.created_by,
+    }),
+  };
+  return converters[table]?.() || row;
+}
+
+async function dbInsert(table, payload) {
+  if (!LOCAL_AUTH_BYPASS) return insertRemote(table, payload);
+  const collection = tableCollections[table];
+  if (!collection) return null;
+  const item = localFromDb(table, { id: uid(table), ...payload });
+  state.data[collection].unshift(item);
+  return item;
+}
+
+async function dbUpdate(table, id, payload, idColumn = "id") {
+  if (!LOCAL_AUTH_BYPASS) return updateRemote(table, id, payload, idColumn);
+  if (table === "household_settings") {
+    state.data.settings = {
+      ...state.data.settings,
+      mainAccountId: payload.main_account_id || "",
+      highSpendingAlertRate: payload.high_spending_alert_rate,
+      defaultMarketForecast: payload.default_market_forecast,
+      forecastMonths: payload.forecast_months,
+    };
+    return state.data.settings;
+  }
+  const collection = tableCollections[table];
+  const index = state.data[collection]?.findIndex((item) => item.id === id) ?? -1;
+  if (index < 0) return null;
+  state.data[collection][index] = localFromDb(table, { id, ...payload });
+  return state.data[collection][index];
+}
+
+async function dbDelete(table, id) {
+  if (!LOCAL_AUTH_BYPASS) return deleteRemote(table, id);
+  const collection = tableCollections[table];
+  if (!collection) return null;
+  state.data[collection] = state.data[collection].filter((item) => item.id !== id);
+  return null;
 }
 
 function options(items, selected = "") {
@@ -285,12 +577,16 @@ function dueText(occurrence) {
 
 function routeMeta(route) {
   const map = {
-    dashboard: ["Dashboard", "Situação financeira"],
-    pending: ["Pendências do mês", "Planejado vs realizado"],
+    dashboard: ["Hoje", "Quanto ainda podemos gastar"],
+    pending: ["A fazer", "Pagamentos e recebimentos do mês"],
+    future: ["Futuro", "Compromissos e previsão dos próximos meses"],
+    history: ["Histórico", "O que aconteceu de verdade"],
+    registrations: ["Cadastros", "Estrutura e regras do financeiro"],
     transactions: ["Movimentações", "Eventos financeiros reais"],
     accounts: ["Contas bancárias", "Saldos e fluxo por conta"],
     cards: ["Cartões", "Faturas, limites e compras"],
-    planning: ["Planejamento", "Recorrências e previsão"],
+    planning: ["Compromissos", "Recorrências que alimentam a previsão"],
+    goals: ["Metas", "Limites mensais por categoria"],
     investments: ["Investimentos", "Patrimônio investido"],
     categories: ["Categorias", "Classificação e orçamentos"],
     settings: ["Configurações", "Preferências do assistente"],
@@ -299,10 +595,11 @@ function routeMeta(route) {
 }
 
 function renderNav() {
+  const registrationRoutes = ["accounts", "cards", "planning", "categories", "investments", "settings"];
   const routeButtons = navItems
     .map(
       (item) => `
-        <button class="nav-item ${state.route === item.route ? "active" : ""}" type="button" data-route="${item.route}">
+        <button class="nav-item ${state.route === item.route || (item.route === "registrations" && registrationRoutes.includes(state.route)) || (item.route === "history" && state.route === "transactions") ? "active" : ""}" type="button" data-route="${item.route}">
           <i data-lucide="${item.icon}"></i>
           <span>${escapeHtml(item.label)}</span>
         </button>
@@ -347,6 +644,8 @@ function render() {
     pageTitle.textContent = "Carregando";
     pageEyebrow.textContent = "Conectando ao Supabase";
     appRoot.innerHTML = `<section class="auth-shell"><div class="auth-card"><h2>Carregando seus dados...</h2><p>Conectando ao Supabase e verificando a sessão.</p></div></section>`;
+    quickAddButton.hidden = true;
+    modalRoot.innerHTML = "";
     refreshIcons();
     return;
   }
@@ -357,6 +656,8 @@ function render() {
     pageEyebrow.textContent = "Financeiro pessoal";
     sidebarNav.innerHTML = "";
     appRoot.innerHTML = renderAuth();
+    quickAddButton.hidden = true;
+    modalRoot.innerHTML = "";
     refreshIcons();
     return;
   }
@@ -367,19 +668,26 @@ function render() {
   pageEyebrow.textContent = eyebrow;
   renderMonthSelector();
   renderNav();
+  quickAddButton.hidden = false;
 
   const routes = {
     dashboard: renderDashboard,
     pending: renderPending,
+    future: renderFuture,
+    history: renderHistory,
+    registrations: renderRegistrations,
     transactions: renderTransactions,
     accounts: renderAccounts,
     cards: renderCards,
     planning: renderPlanning,
+    goals: renderGoals,
     investments: renderInvestments,
     categories: renderCategories,
     settings: renderSettings,
   };
   appRoot.innerHTML = (routes[state.route] || renderDashboard)();
+  formatMoneyInputs();
+  renderQuickAddModal();
   refreshIcons();
 }
 
@@ -388,7 +696,7 @@ function renderAuth() {
     <section class="auth-shell">
       <article class="auth-card">
         <div class="brand auth-brand">
-          <div class="brand-mark">FP</div>
+          <img class="brand-mark" src="/assets/icons/icon-192.png?v=7" alt="" />
           <div>
             <strong>Financeiro</strong>
             <span>assistente familiar</span>
@@ -412,157 +720,324 @@ function renderAuth() {
   `;
 }
 
+function localToday() {
+  const today = new Date();
+  return `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+}
+
+function renderQuickAddModal() {
+  if (!state.user || !state.quickAddOpen) {
+    modalRoot.innerHTML = "";
+    document.body.classList.remove("modal-open");
+    return;
+  }
+  const defaultDate = state.month === currentMonth() ? localToday() : `${state.month}-01`;
+  const preset = state.quickAddPreset || {};
+  const openLoans = loanSummary().borrowers;
+  modalRoot.innerHTML = `
+    <div class="modal-backdrop" data-action="close-quick-add">
+      <section class="universal-modal" role="dialog" aria-modal="true" aria-labelledby="quickAddTitle">
+        <div class="modal-header">
+          <div><span class="eyebrow">Cadastro universal</span><h2 id="quickAddTitle">O que aconteceu?</h2><p>Compra, parcela, assinatura ou conta fixa: tudo começa aqui.</p></div>
+          <button class="icon-button modal-close" type="button" data-action="close-quick-add" aria-label="Fechar"><i data-lucide="x"></i></button>
+        </div>
+        <form class="universal-form" data-form="universal-entry">
+          <div class="entry-kind-switch" role="group" aria-label="Tipo de lançamento">
+            <label><input type="radio" name="entryType" value="expense" ${preset.entryType !== "loan" ? "checked" : ""} /><span><i data-lucide="arrow-up-right"></i>Gasto</span></label>
+            <label><input type="radio" name="entryType" value="income" /><span><i data-lucide="arrow-down-left"></i>Receita</span></label>
+            <label><input type="radio" name="entryType" value="loan" ${preset.entryType === "loan" ? "checked" : ""} /><span><i data-lucide="hand-coins"></i>Empréstimo</span></label>
+          </div>
+          <label class="form-group wide" data-universal-field="description"><span class="form-label">Descrição</span><input name="description" placeholder="Ex.: mercado, Spotify, aluguel" autocomplete="off" required /></label>
+          <fieldset class="repeat-fieldset full is-hidden" data-universal-field="loan-action">
+            <legend>Movimento</legend>
+            <label><input type="radio" name="loanAction" value="lend" ${preset.loanAction !== "repayment" ? "checked" : ""} /><span><strong>Emprestar</strong><small>Aumenta o valor a receber</small></span></label>
+            <label><input type="radio" name="loanAction" value="repayment" ${preset.loanAction === "repayment" ? "checked" : ""} /><span><strong>Receber devolução</strong><small>Desconta o que a pessoa deve</small></span></label>
+          </fieldset>
+          <label class="form-group wide is-hidden" data-universal-field="loan-person"><span class="form-label">Quem recebeu?</span><input name="loanPerson" value="${escapeHtml(preset.personName || "")}" placeholder="Nome da pessoa" autocomplete="off" /></label>
+          <label class="form-group wide is-hidden" data-universal-field="repayment-person"><span class="form-label">Quem está pagando?</span><select name="repaymentPersonKey"><option value="">Selecione</option>${options(openLoans.map((person) => ({ value: person.personKey, label: `${person.personName} · deve ${formatCurrency(person.balance)}` })), preset.personKey || "")}</select></label>
+          <label class="form-group"><span class="form-label">Valor</span><input name="amount" ${moneyInputAttributes()} placeholder="R$ 0,00" required /></label>
+          <label class="form-group"><span class="form-label" data-universal-date-label>Data da compra ou vencimento</span><input name="date" type="date" value="${defaultDate}" required /></label>
+          <label class="form-group" data-universal-field="category"><span class="form-label">Categoria</span><select name="categoryId" required><option value="">Selecione</option>${categoryOptions()}</select></label>
+          <label class="form-group" data-universal-field="payment"><span class="form-label">Como será pago?</span><select name="paymentMethod">${options(paymentMethods, "Cartão crédito")}</select></label>
+          <label class="form-group is-hidden" data-universal-field="loan-due"><span class="form-label">Previsão de devolução <small>(opcional)</small></span><input name="loanDueDate" type="date" /></label>
+          <label class="form-group" data-universal-field="card"><span class="form-label">Cartão</span><select name="cardId"><option value="">Selecione</option>${cardOptions()}</select>${!state.data.cards.length ? `<small class="field-help">Cadastre um cartão antes de salvar.</small>` : ""}</label>
+          <label class="form-group" data-universal-field="account"><span class="form-label">Conta</span><select name="accountId">${accountOptions(state.data.settings.mainAccountId, true)}</select></label>
+          <fieldset class="repeat-fieldset full" data-universal-field="repeat">
+            <legend>Isso acontece como?</legend>
+            <label><input type="radio" name="repeatMode" value="one_time" checked /><span><strong>Uma vez</strong><small>Compra ou recebimento já feito</small></span></label>
+            <label data-universal-choice="installments"><input type="radio" name="repeatMode" value="installments" /><span><strong>Parcelado</strong><small>Uma compra dividida no cartão</small></span></label>
+            <label><input type="radio" name="repeatMode" value="monthly" /><span><strong>Todo mês</strong><small>Assinatura, boleto, aluguel ou receita</small></span></label>
+          </fieldset>
+          <label class="form-group is-hidden" data-universal-field="installments"><span class="form-label">Quantidade de parcelas</span><input name="installments" type="number" min="2" max="120" value="2" /></label>
+          <label class="form-group is-hidden" data-universal-field="occurrences"><span class="form-label">Por quantos meses?</span><select name="totalOccurrences"><option value="0">Sem data para terminar</option><option value="3">3 meses</option><option value="6">6 meses</option><option value="10">10 meses</option><option value="12">12 meses</option><option value="24">24 meses</option><option value="36">36 meses</option></select><small class="field-help">Use uma duração para dívidas ou acordos em PIX.</small></label>
+          <label class="form-group full"><span class="form-label">Observação <small>(opcional)</small></span><input name="notes" placeholder="Algum detalhe útil" /></label>
+          <div class="universal-summary full" data-universal-summary><i data-lucide="sparkles"></i><span>Será registrado como uma compra única no cartão.</span></div>
+          <div class="modal-actions full">
+            <button class="button ghost" type="button" data-action="close-quick-add">Cancelar</button>
+            <button class="button" type="submit"><i data-lucide="check"></i><span>Salvar</span></button>
+            <button class="button secondary" type="submit" data-keep-open="true"><i data-lucide="plus"></i><span>Salvar e adicionar outro</span></button>
+          </div>
+        </form>
+      </section>
+    </div>`;
+  document.body.classList.add("modal-open");
+  formatMoneyInputs(modalRoot);
+  updateUniversalFormVisibility();
+  refreshIcons();
+  const initialFocus = preset.entryType === "loan"
+    ? preset.loanAction === "repayment" ? '[name="repaymentPersonKey"]' : '[name="loanPerson"]'
+    : '[name="description"]';
+  window.setTimeout(() => modalRoot.querySelector(initialFocus)?.focus(), 0);
+}
+
+function updateUniversalFormVisibility() {
+  const form = modalRoot.querySelector('[data-form="universal-entry"]');
+  if (!form) return;
+  const entryType = form.querySelector('[name="entryType"]:checked')?.value || "expense";
+  const isLoan = entryType === "loan";
+  const loanAction = form.querySelector('[name="loanAction"]:checked')?.value || "lend";
+  if (isLoan) form.elements.paymentMethod.value = "PIX";
+  if (entryType === "income" && form.elements.paymentMethod.value === "Cartão crédito") form.elements.paymentMethod.value = "PIX";
+  const paymentMethod = form.elements.paymentMethod.value;
+  const repeatMode = form.querySelector('[name="repeatMode"]:checked')?.value || "one_time";
+  const usesCard = paymentMethod === "Cartão crédito";
+  const categorySelect = form.elements.categoryId;
+  if (!isLoan && categorySelect.dataset.kind !== entryType) {
+    const previousCategory = categorySelect.value;
+    categorySelect.innerHTML = `<option value="">Selecione</option>${categoryOptions(previousCategory, entryType)}`;
+    categorySelect.dataset.kind = entryType;
+  }
+  form.elements.categoryId.required = !isLoan;
+  form.elements.description.required = !isLoan;
+  form.querySelector('[data-universal-field="description"]')?.classList.toggle("is-hidden", isLoan);
+  form.querySelector('[data-universal-field="category"]')?.classList.toggle("is-hidden", isLoan);
+  form.querySelector('[data-universal-field="payment"]')?.classList.toggle("is-hidden", isLoan);
+  form.querySelector('[data-universal-field="card"]')?.classList.toggle("is-hidden", !usesCard || isLoan);
+  form.querySelector('[data-universal-field="account"]')?.classList.toggle("is-hidden", usesCard && !isLoan);
+  form.querySelector('[data-universal-field="repeat"]')?.classList.toggle("is-hidden", isLoan);
+  form.querySelector('[data-universal-field="loan-action"]')?.classList.toggle("is-hidden", !isLoan);
+  form.querySelector('[data-universal-field="loan-person"]')?.classList.toggle("is-hidden", !isLoan || loanAction !== "lend");
+  form.querySelector('[data-universal-field="repayment-person"]')?.classList.toggle("is-hidden", !isLoan || loanAction !== "repayment");
+  form.querySelector('[data-universal-field="loan-due"]')?.classList.toggle("is-hidden", !isLoan || loanAction !== "lend");
+  form.elements.loanPerson.required = isLoan && loanAction === "lend";
+  form.elements.repaymentPersonKey.required = isLoan && loanAction === "repayment";
+  form.querySelector('[data-universal-date-label]').textContent = isLoan ? "Data do movimento" : "Data da compra ou vencimento";
+  form.querySelector('[data-universal-choice="installments"]')?.classList.toggle("is-hidden", !usesCard || entryType === "income" || isLoan);
+  form.querySelector('[data-universal-field="occurrences"]')?.classList.toggle("is-hidden", isLoan || repeatMode !== "monthly");
+  if ((!usesCard || entryType === "income") && repeatMode === "installments") {
+    form.querySelector('[name="repeatMode"][value="one_time"]').checked = true;
+  }
+  const effectiveMode = form.querySelector('[name="repeatMode"]:checked')?.value || "one_time";
+  form.querySelector('[data-universal-field="installments"]')?.classList.toggle("is-hidden", isLoan || effectiveMode !== "installments");
+  const labels = {
+    one_time: entryType === "income" ? "Será registrada como uma receita realizada." : usesCard ? "Entrará na fatura correta conforme o fechamento do cartão." : "Será registrado como um gasto realizado.",
+    installments: "O valor total será dividido entre as faturas. A meta mensal recebe apenas cada parcela.",
+    monthly: usesCard ? "Será criado uma vez e aparecerá automaticamente nas próximas faturas." : "Será criado uma vez e aparecerá automaticamente em A fazer e no Futuro.",
+  };
+  form.querySelector("[data-universal-summary] span").textContent = isLoan
+    ? loanAction === "lend" ? "O saldo da pessoa será aumentado." : "O pagamento será descontado do saldo da pessoa."
+    : labels[effectiveMode];
+}
+
+async function saveUniversalEntry(form, keepOpen = false) {
+  const raw = readForm(form);
+  const entryType = raw.entryType || "expense";
+  const repeatMode = raw.repeatMode || "one_time";
+  const amount = toNumber(raw.amount);
+  if (!amount) throw new Error("Informe um valor maior que zero.");
+  const card = state.data.cards.find((item) => item.id === raw.cardId);
+  const usesCard = raw.paymentMethod === "Cartão crédito" && entryType === "expense";
+  if (usesCard && !card) throw new Error("Selecione um cartão ou cadastre um em Cadastros.");
+
+  if (entryType === "loan") {
+    const action = raw.loanAction || "lend";
+    const loans = loanSummary();
+    const existing = loans.borrowers.find((person) => person.personKey === raw.repaymentPersonKey);
+    const personName = action === "lend" ? raw.loanPerson?.trim() : existing?.personName;
+    const personKey = action === "lend" ? normalize(personName) : existing?.personKey;
+    if (!personName || !personKey) throw new Error("Informe ou selecione a pessoa.");
+    if (action === "repayment" && amount > existing.balance + 0.005) {
+      throw new Error(`${personName} deve ${formatCurrency(existing.balance)}. O pagamento informado é maior que o saldo.`);
+    }
+    const notes = withFinanceMeta(raw.notes, {
+      source: "universal",
+      kind: "loan",
+      action,
+      personKey,
+      personName,
+      dueDate: action === "lend" ? raw.loanDueDate || "" : "",
+    });
+    await dbInsert("transactions", toDbTransaction({
+      type: "transfer",
+      description: action === "lend" ? `Empréstimo para ${personName}` : `Devolução de ${personName}`,
+      amount,
+      date: raw.date,
+      categoryId: "",
+      accountId: raw.accountId,
+      fromAccountId: action === "lend" ? raw.accountId : "",
+      toAccountId: action === "repayment" ? raw.accountId : "",
+      cardId: "",
+      paymentMethod: action === "lend" ? "Dinheiro emprestado" : "Devolução de empréstimo",
+      linkedPlanningId: "",
+      installments: 1,
+      currentInstallment: 1,
+      status: "confirmed",
+      notes,
+    }, state.householdId, state.user.id));
+    state.quickAddOpen = keepOpen;
+    state.quickAddPreset = keepOpen ? { entryType: "loan" } : null;
+    await persist(action === "lend" ? "Empréstimo registrado." : "Devolução registrada.");
+    if (keepOpen) renderQuickAddModal();
+    return;
+  }
+
+  if (repeatMode === "monthly") {
+    const totalOccurrences = Math.max(0, Math.trunc(toNumber(raw.totalOccurrences)) || 0);
+    const notes = withFinanceMeta(raw.notes, {
+      source: "universal",
+      repeatMode: "monthly",
+      startMonth: raw.date.slice(0, 7),
+      totalOccurrences,
+    });
+    await dbInsert("planning_items", toDbPlanning({
+      group: entryType === "income" ? "income" : usesCard ? "subscription" : "expense",
+      type: entryType,
+      name: raw.description.trim(),
+      amount,
+      recurrence: "monthly",
+      day: Math.max(1, toNumber(raw.date.slice(8, 10)) || 1),
+      categoryId: raw.categoryId,
+      accountId: usesCard ? card.accountId : raw.accountId,
+      cardId: usesCard ? card.id : "",
+      paymentMethod: usesCard ? "Cartão crédito" : raw.paymentMethod,
+      active: true,
+      notes,
+    }, state.householdId, state.user.id));
+  } else {
+    const installments = repeatMode === "installments" ? Math.max(2, Math.trunc(toNumber(raw.installments)) || 2) : 1;
+    const notes = usesCard
+      ? withFinanceMeta(raw.notes, { source: "universal", invoiceMonth: firstCardInvoiceMonth(card, raw.date) })
+      : raw.notes?.trim() || "";
+    await dbInsert("transactions", toDbTransaction({
+      type: entryType === "income" ? "income" : usesCard ? "card" : "expense",
+      description: raw.description.trim(),
+      amount,
+      date: raw.date,
+      categoryId: raw.categoryId,
+      accountId: usesCard ? card.accountId : raw.accountId,
+      cardId: usesCard ? card.id : "",
+      paymentMethod: usesCard ? "Cartão crédito" : raw.paymentMethod,
+      linkedPlanningId: "",
+      installments,
+      currentInstallment: 1,
+      status: "confirmed",
+      notes,
+    }, state.householdId, state.user.id));
+  }
+
+  state.quickAddOpen = keepOpen;
+  state.quickAddPreset = null;
+  await persist(repeatMode === "monthly" ? "Compromisso recorrente criado." : "Lançamento salvo.");
+  if (keepOpen) renderQuickAddModal();
+}
+
 function renderDashboard() {
   const finance = calculateFinance(state.data, state.month);
   const highPriority = finance.todayTasks;
-  const saldoTone = finance.saldoDisponivelReal >= 0 ? "positive" : "negative";
+  const budgets = finance.categoryBudgets.filter((category) => category.budget > 0);
+  const loans = loanSummary();
 
   return `
-    <section class="command-center">
-      <div class="availability-card">
-        <span class="summary-kicker">Dinheiro realmente disponível em ${escapeHtml(monthLabel(state.month))}</span>
-        <strong>${formatCurrency(finance.saldoDisponivelReal)}</strong>
-        <p>Saldo atual menos pendências abertas.</p>
+    <section class="today-overview">
+      <article class="spending-power ${finance.categoryBudget.configuredCount > 0 && finance.categoryBudget.availableForNewSpending <= 0 ? "is-alert" : ""}">
+        <span class="summary-kicker">Ainda podemos decidir gastar em ${escapeHtml(monthLabel(state.month))}</span>
+        <strong>${formatCurrency(finance.categoryBudget.availableForNewSpending)}</strong>
+        <p>Este valor já desconta contas previstas, parcelas e reservas das metas por categoria.</p>
         <div class="availability-grid">
-          <span><b>${formatCurrency(finance.saldoAtual)}</b> saldo atual</span>
-          <span><b>${formatCurrency(finance.pendingExpense)}</b> gastos pendentes</span>
-          <span><b>${formatCurrency(finance.saldoAposPendencias)}</b> após pendências</span>
+          <span><b>${formatCurrency(finance.actualExpense)}</b> já gasto</span>
+          <span><b>${formatCurrency(finance.categoryBudget.committed)}</b> comprometido</span>
+          <span><b>${formatCurrency(finance.categoryBudget.reserved)}</b> reservado nas metas</span>
         </div>
-      </div>
+        <button class="button inverted" type="button" data-action="open-quick-add"><i data-lucide="plus"></i><span>Registrar compra</span></button>
+      </article>
 
-      <div class="today-card">
+      <article class="panel today-actions">
         <div class="panel-header">
           <div>
-            <h2 class="panel-title">Hoje preciso resolver</h2>
-            <p class="panel-subtitle">Itens previstos que estão próximos ou vencidos.</p>
+            <h2 class="panel-title">O que pede atenção</h2>
+            <p class="panel-subtitle">Vencimentos dos próximos 7 dias.</p>
           </div>
+          <a class="action-link" href="#/pending">Ver tudo</a>
         </div>
         <div class="task-list">
-          ${
-            highPriority.length
-              ? highPriority.map((item) => dashboardTask(item)).join("")
-              : `<div class="empty-state compact">Nenhuma pendência urgente nos próximos 7 dias.</div>`
-          }
+          ${highPriority.length ? highPriority.map((item) => dashboardTask(item)).join("") : `<div class="empty-state compact">Tudo em dia por aqui.</div>`}
         </div>
-      </div>
+      </article>
     </section>
 
-    <section class="metric-grid dense">
-      ${metricCard({
-        label: "Receitas previstas",
-        value: formatCurrency(finance.plannedIncome),
-        note: `${formatCurrency(finance.pendingIncome)} ainda pendentes`,
-        icon: "calendar-plus",
-        tone: "positive",
-      })}
-      ${metricCard({
-        label: "Despesas previstas",
-        value: formatCurrency(finance.plannedExpense),
-        note: `${formatCurrency(finance.pendingExpense)} ainda pendentes`,
-        icon: "calendar-minus",
-      })}
-      ${metricCard({
-        label: "Receitas realizadas",
-        value: formatCurrency(finance.actualIncome),
-        note: `${finance.doneOccurrences.filter((item) => item.type === "income").length} item(ns) conciliados`,
-        icon: "circle-dollar-sign",
-        tone: "positive",
-      })}
-      ${metricCard({
-        label: "Despesas realizadas",
-        value: formatCurrency(finance.actualExpense),
-        note: `${formatPercent(finance.realizationRate)} do previsto`,
-        icon: "receipt-text",
-        tone: "negative",
-      })}
-      ${metricCard({
-        label: "Saldo previsto final",
-        value: formatCurrency(finance.saldoPrevistoFinal),
-        note: "Saldo em contas após entradas e saídas pendentes",
-        icon: "line-chart",
-        tone: saldoTone,
-      })}
-      ${metricCard({
-        label: "Saldo atual",
-        value: formatCurrency(finance.saldoAtual),
-        note: "Soma das contas cadastradas",
-        icon: "landmark",
-      })}
-      ${metricCard({
-        label: "Investimentos",
-        value: formatCurrency(finance.investments.total),
-        note: `${formatCurrency(finance.investments.realYield)} de rendimento real estimado`,
-        icon: "trending-up",
-        tone: "positive",
-      })}
-      ${metricCard({
-        label: "Próximos pagamentos",
-        value: finance.upcomingPayments.length,
-        note: `${finance.upcomingSubscriptions.length} assinatura(s) próxima(s)`,
-        icon: "bell",
-      })}
+    <section class="section-heading">
+      <div><h2>Quanto resta por categoria</h2><p>Gasto real + parcelas + recorrências já assumidas.</p></div>
+      <a class="action-link" href="#/goals">Ajustar metas</a>
+    </section>
+    <section class="budget-card-grid">
+      ${budgets.length ? budgets.map(categoryBudgetCard).join("") : `<article class="empty-state budget-empty"><strong>Nenhuma meta definida</strong><a class="button small" href="#/goals">Definir metas</a></article>`}
     </section>
 
-    <section class="dashboard-grid">
-      ${panel({
-        title: "Receitas x despesas",
-        subtitle: "Realizado nos últimos meses.",
-        span: 6,
-        body: groupedBarChart(finance.monthlyEvolution),
-      })}
-      ${panel({
-        title: "Previsto x realizado",
-        subtitle: "O que estava planejado contra o que aconteceu.",
-        span: 6,
-        body: barChart(finance.plannedVsRealized),
-      })}
-      ${panel({
-        title: "Gastos por categoria",
-        subtitle: "Somente movimentações reais do mês.",
-        span: 5,
-        body: donutChart(finance.byCategory, { centerLabel: "Gastos" }),
-      })}
-      ${panel({
-        title: "Evolução mensal",
-        subtitle: "Saldo realizado mês a mês.",
-        span: 7,
-        body: lineChart(
-          finance.monthlyEvolution.map((item) => ({ label: item.label, value: item.balance })),
-          { color: finance.saldoPrevistoFinal >= 0 ? "#0f766e" : "#dc2626" },
-        ),
-      })}
-      ${panel({
-        title: "Forma de pagamento",
-        subtitle: "PIX, cartão, boleto, dinheiro e outros.",
-        span: 4,
-        body: comparisonBars(finance.byPaymentMethod),
-      })}
-      ${panel({
-        title: "Gastos por conta",
-        subtitle: "Conta bancária vinculada à movimentação.",
-        span: 4,
-        body: comparisonBars(finance.byAccount),
-      })}
-      ${panel({
-        title: "Investimentos",
-        subtitle: "Evolução do patrimônio investido.",
-        span: 4,
-        body: lineChart(finance.investments.history, { color: "#166534" }),
-      })}
+    <section class="metric-grid compact-metrics">
+      ${metricCard({ label: "Receita do mês", value: formatCurrency(finance.actualIncome + finance.pendingIncome), note: `${formatCurrency(finance.pendingIncome)} ainda a receber`, icon: "wallet-cards", tone: "positive" })}
+      ${metricCard({ label: "Contas previstas", value: formatCurrency(finance.pendingExpense), note: "Inclui faturas e compromissos", icon: "calendar-clock" })}
+      ${metricCard({ label: "Saldo após o mês", value: formatCurrency(finance.saldoPrevistoFinal), note: "Se tudo previsto acontecer", icon: "arrow-right-left", tone: finance.saldoPrevistoFinal >= 0 ? "positive" : "negative" })}
+    </section>
+
+    ${renderLoansPanel(loans)}
+
+    <section class="dashboard-grid simplified-charts">
+      ${panel({ title: "Gastos realizados", subtitle: "Distribuição do que já aconteceu.", span: 5, body: donutChart(finance.byCategory, { centerLabel: "Gastos" }) })}
+      ${panel({ title: "Últimos meses", subtitle: "Receitas e despesas efetivamente registradas.", span: 7, body: groupedBarChart(finance.monthlyEvolution) })}
     </section>
   `;
+}
+
+function renderLoansPanel(loans) {
+  return `
+    <section class="loan-panel panel">
+      <div class="loan-total">
+        <span class="icon-badge"><i data-lucide="hand-coins"></i></span>
+        <div><small>A receber de empréstimos</small><strong>${formatCurrency(loans.totalReceivable)}</strong></div>
+      </div>
+      <div class="loan-people">
+        ${loans.borrowers.length ? loans.borrowers.map((person) => `
+          <article class="loan-person">
+            <span><strong>${escapeHtml(person.personName)}</strong><small>${person.dueDate ? `Previsto ${formatDate(person.dueDate)}` : `${person.movements} movimento(s)`}</small></span>
+            <b>${formatCurrency(person.balance)}</b>
+            <button class="button ghost small" type="button" data-action="open-loan-repayment" data-person-key="${escapeHtml(person.personKey)}" data-person-name="${escapeHtml(person.personName)}">Receber</button>
+          </article>`).join("") : `<span class="loan-empty">Nenhum valor emprestado.</span>`}
+      </div>
+      <button class="button secondary small" type="button" data-action="open-quick-add-loan"><i data-lucide="plus"></i><span>Emprestar</span></button>
+    </section>`;
+}
+
+function categoryBudgetCard(category) {
+  const width = Math.min(100, category.progress * 100);
+  const status = category.exceeded > 0 ? `Excedeu ${formatCurrency(category.exceeded)}` : `${formatCurrency(category.available)} livres`;
+  return `
+    <article class="budget-card ${category.exceeded > 0 ? "is-over" : ""}">
+      <div class="budget-title"><span class="legend-dot" style="background:${escapeHtml(category.color)}"></span><strong>${escapeHtml(category.name)}</strong><span>${formatPercent(category.progress)}</span></div>
+      <div class="progress-track"><div class="progress-fill ${category.exceeded > 0 ? "is-over" : ""}" style="width:${width}%;background:${escapeHtml(category.color)}"></div></div>
+      <div class="budget-values"><span><small>Gasto</small>${formatCurrency(category.spent)}</span><span><small>Comprometido</small>${formatCurrency(category.committed)}</span><strong>${status}</strong></div>
+    </article>`;
 }
 
 function dashboardTask(item) {
   const variant = item.daysUntil < 0 ? "danger" : item.daysUntil <= 1 ? "warning" : "neutral";
   return `
     <article class="task-item">
-      <span class="task-check">□</span>
+      <span class="task-check" aria-hidden="true"></span>
       <div>
         <strong>${escapeHtml(item.name)}</strong>
         <span>${escapeHtml(dueText(item))} · ${formatCurrency(item.expectedAmount)}</span>
       </div>
-      ${badge(item.type === "income" ? "Receber" : "Pagar", variant)}
+      <span class="task-action ${variant}">${item.type === "income" ? "Receber" : "Pagar"}</span>
     </article>
   `;
 }
@@ -596,6 +1071,114 @@ function renderPending() {
   `;
 }
 
+function renderFuture() {
+  let rollingBalance = calculateFinance(state.data, state.month).saldoPrevistoFinal;
+  const months = Array.from({ length: 6 }, (_, index) => addMonths(state.month, index + 1)).map((month) => {
+    const finance = calculateFinance(state.data, month);
+    const reserve = finance.categoryBudget.reserved;
+    const commitments = finance.plannedExpense;
+    const opening = rollingBalance;
+    const ending = opening + finance.plannedIncome - commitments - reserve;
+    rollingBalance = ending;
+    return { month, finance, opening, commitments, reserve, ending };
+  });
+  const first = months[0];
+  const committedPurchases = state.data.transactions
+    .filter((transaction) => transaction.type === "card" && toNumber(transaction.installments) > 1)
+    .reduce((total, transaction) => {
+      const firstInvoice = parseFinanceMeta(transaction.notes).invoiceMonth || String(transaction.date).slice(0, 7);
+      const elapsed = Math.max(0, monthDistance(firstInvoice, state.month));
+      const currentInstallment = Math.max(1, toNumber(transaction.currentInstallment) + elapsed);
+      const remaining = Math.max(0, toNumber(transaction.installments) - currentInstallment + 1);
+      return total + cardInstallmentAmount(transaction) * remaining;
+    }, 0);
+
+  return `
+    <section class="future-hero">
+      <div><span class="summary-kicker">Próximo mês</span><h2>${escapeHtml(monthLabel(first.month))}</h2><strong class="${first.ending < 0 ? "negative" : ""}">${formatCurrency(first.ending)}</strong><p>Saldo estimado depois de receitas, compromissos e reservas de categoria.</p></div>
+      <div class="future-formula">
+        <span><small>Começa com</small><b>${formatCurrency(first.opening)}</b></span>
+        <i data-lucide="plus"></i>
+        <span><small>Receitas</small><b>${formatCurrency(first.finance.plannedIncome)}</b></span>
+        <i data-lucide="minus"></i>
+        <span><small>Já assumido</small><b>${formatCurrency(first.commitments)}</b></span>
+        <i data-lucide="minus"></i>
+        <span><small>Margem de metas</small><b>${formatCurrency(first.reserve)}</b></span>
+      </div>
+    </section>
+
+    <section class="metric-grid compact-metrics">
+      ${metricCard({ label: "Parcelas ainda abertas", value: formatCurrency(committedPurchases), note: "Dívida total futura, separada do orçamento mensal", icon: "layers-3" })}
+      ${metricCard({ label: "Compromissos recorrentes", value: state.data.planningItems.filter((item) => item.active).length, note: "Assinaturas, boletos, PIX e receitas", icon: "repeat-2" })}
+      ${metricCard({ label: "Horizonte saudável", value: `${months.filter((item) => item.ending >= 0).length} de 6 meses`, note: "Meses que terminam com saldo positivo", icon: "shield-check", tone: months.every((item) => item.ending >= 0) ? "positive" : "negative" })}
+    </section>
+
+    <section class="panel forecast-panel">
+      <div class="panel-header"><div><h2 class="panel-title">Visão de seis meses</h2><p class="panel-subtitle">Uma previsão viva: ela muda conforme novas compras e compromissos são registrados.</p></div><button class="button small" type="button" data-action="open-quick-add"><i data-lucide="plus"></i><span>Novo compromisso</span></button></div>
+      <div class="forecast-table">
+        <div class="forecast-row forecast-head"><span>Mês</span><span>Receitas</span><span>Compromissos</span><span>Reserva livre</span><span>Saldo final</span><span>Leitura</span></div>
+        ${months.map((item) => `
+          <div class="forecast-row">
+            <strong>${escapeHtml(monthLabel(item.month))}</strong>
+            <span class="positive">+ ${formatCurrency(item.finance.plannedIncome)}</span>
+            <span>- ${formatCurrency(item.commitments)}</span>
+            <span>- ${formatCurrency(item.reserve)}</span>
+            <strong class="${item.ending < 0 ? "negative" : ""}">${formatCurrency(item.ending)}</strong>
+            ${badge(item.ending < 0 ? "Atenção" : item.ending < item.reserve ? "Apertado" : "Confortável", item.ending < 0 ? "danger" : item.ending < item.reserve ? "warning" : "success")}
+          </div>`).join("")}
+      </div>
+    </section>
+
+    <section class="forecast-note"><i data-lucide="info"></i><span><strong>Como ler:</strong> parcelas entram somente pelo valor mensal. A dívida restante aparece separada acima, evitando distorcer o orçamento de cada mês.</span></section>
+  `;
+}
+
+function renderHistory() {
+  const selected = calculateFinance(state.data, state.month);
+  const months = Array.from({ length: 12 }, (_, index) => addMonths(state.month, index - 11)).map((month) => {
+    const finance = calculateFinance(state.data, month);
+    return { month, income: finance.actualIncome, expense: finance.actualExpense, balance: finance.actualIncome - finance.actualExpense, count: finance.transactions.length };
+  }).reverse();
+
+  return `
+    <section class="metric-grid compact-metrics">
+      ${metricCard({ label: "Receitas realizadas", value: formatCurrency(selected.actualIncome), note: monthLabel(state.month), icon: "arrow-down-left", tone: "positive" })}
+      ${metricCard({ label: "Gastos realizados", value: formatCurrency(selected.actualExpense), note: `${selected.transactions.length} lançamento(s)`, icon: "arrow-up-right", tone: "negative" })}
+      ${metricCard({ label: "Resultado real", value: formatCurrency(selected.actualIncome - selected.actualExpense), note: "Receita menos gastos registrados", icon: "equal", tone: selected.actualIncome >= selected.actualExpense ? "positive" : "negative" })}
+    </section>
+    <section class="dashboard-grid history-grid">
+      ${panel({ title: "Para onde foi o dinheiro", subtitle: monthLabel(state.month), span: 5, body: donutChart(selected.byCategory, { centerLabel: "Gastos" }) })}
+      ${panel({ title: "Evolução realizada", subtitle: "Sem misturar previsões com o que já aconteceu.", span: 7, body: groupedBarChart([...months].reverse().slice(-6).map((item) => ({ label: monthLabel(item.month).split(" de ")[0], income: item.income, expense: item.expense, balance: item.balance }))) })}
+    </section>
+    <section class="panel history-panel">
+      <div class="panel-header"><div><h2 class="panel-title">Fechamento mensal</h2><p class="panel-subtitle">Clique no mês no topo para analisar categorias e lançamentos.</p></div><a class="button ghost small" href="#/transactions">Ver lançamentos</a></div>
+      <div class="history-list">
+        ${months.map((item) => `<button class="history-row ${item.month === state.month ? "is-active" : ""}" type="button" data-month="${item.month}"><span><strong>${escapeHtml(monthLabel(item.month))}</strong><small>${item.count} lançamento(s)</small></span><span class="positive">${formatCurrency(item.income)}</span><span class="negative">${formatCurrency(item.expense)}</span><strong class="${item.balance < 0 ? "negative" : ""}">${formatCurrency(item.balance)}</strong></button>`).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function renderRegistrations() {
+  const activeCommitments = state.data.planningItems.filter((item) => item.active).length;
+  const cardsLabel = state.data.cards.length === 1 ? "1 cartão" : `${state.data.cards.length} cartões`;
+  return `
+    <section class="registrations-intro"><div><span class="eyebrow">Configure uma vez</span><h2>O cotidiano acontece no botão Adicionar</h2><p>Aqui ficam apenas estruturas, limites e compromissos que não precisam ser recadastrados toda semana.</p></div><button class="button" type="button" data-action="open-quick-add"><i data-lucide="plus"></i><span>Adicionar lançamento</span></button></section>
+    <section class="registration-grid">
+      ${registrationCard("landmark", "Contas", `${state.data.accounts.length} cadastrada(s)`, "Saldos e conta principal", "accounts")}
+      ${registrationCard("credit-card", "Cartões", cardsLabel, "Limite, fechamento e vencimento", "cards")}
+      ${registrationCard("repeat-2", "Compromissos", `${activeCommitments} ativo(s)`, "Assinaturas, boletos e PIX recorrentes", "planning")}
+      ${registrationCard("tags", "Categorias", `${state.data.categories.length} cadastrada(s)`, "Organização dos gastos e receitas", "categories")}
+      ${registrationCard("piggy-bank", "Investimentos", `${state.data.investments.length} cadastrado(s)`, "Patrimônio separado do orçamento", "investments")}
+      ${registrationCard("settings", "Preferências", "Família e backup", "Conta principal e parâmetros", "settings")}
+    </section>
+  `;
+}
+
+function registrationCard(icon, title, value, description, route) {
+  return `<a class="registration-card" href="#/${route}"><span class="registration-icon"><i data-lucide="${icon}"></i></span><div><h3>${escapeHtml(title)}</h3><strong>${escapeHtml(value)}</strong><p>${escapeHtml(description)}</p></div><i data-lucide="chevron-right"></i></a>`;
+}
+
 function pendingColumn(title, items, doneLabel) {
   return `
     <section class="panel">
@@ -614,29 +1197,44 @@ function pendingColumn(title, items, doneLabel) {
 
 function pendingItem(item, doneLabel) {
   const isDone = item.status === "done";
+  const details = item.source === "card_invoice" && item.plannedCharges?.length
+    ? `Inclui ${item.plannedCharges.length} recorrência(s) planejada(s) no cartão`
+    : "";
+  const formAttribute =
+    item.source === "card_invoice"
+      ? `data-card-invoice-id="${escapeHtml(item.id)}" data-card-id="${escapeHtml(item.cardId)}"`
+      : `data-pending-id="${escapeHtml(item.planId)}"`;
+  const undoButton = item.transaction?.id
+    ? `<button class="action-link pending-undo" type="button" data-action="undo-pending" data-transaction-id="${escapeHtml(item.transaction.id)}"><i data-lucide="undo-2"></i><span>Desfazer</span></button>`
+    : "";
   return `
-    <article class="pending-item ${isDone ? "is-done" : ""}">
+    <article class="pending-item is-${item.type} ${isDone ? "is-done" : ""}">
       <div class="pending-main">
-        <span class="pending-check">${isDone ? "✓" : "□"}</span>
+        <span class="pending-check ${isDone ? "is-checked" : ""}" aria-hidden="true"></span>
         <div>
           <strong>${escapeHtml(item.name)}</strong>
           <span>${formatDate(item.dueDate)} · previsto ${formatCurrency(item.expectedAmount)}</span>
           ${
             isDone
               ? `<em>Real: ${formatCurrency(item.actualAmount)} · diferença ${formatCurrency(item.difference)}</em>`
-              : `<em>${escapeHtml(dueText(item))}</em>`
+              : `<em>${escapeHtml(dueText(item))}${details ? ` · ${escapeHtml(details)}` : ""}</em>`
           }
         </div>
       </div>
       ${
         isDone
-          ? badge(doneLabel, "success")
+          ? `
+            <div class="pending-done-actions">
+              ${badge(doneLabel, "success")}
+              ${undoButton}
+            </div>
+          `
           : `
-            <form class="quick-realization" data-pending-id="${escapeHtml(item.planId)}">
-              <input name="amount" type="number" step="0.01" value="${escapeHtml(item.expectedAmount)}" aria-label="Valor real" />
+            <form class="quick-realization" ${formAttribute}>
+              <input name="amount" ${moneyInputAttributes()} value="${escapeHtml(item.expectedAmount)}" aria-label="Valor real" />
               <input name="date" type="date" value="${escapeHtml(item.dueDate)}" aria-label="Data real" />
               <input name="notes" type="text" placeholder="Observações" aria-label="Observações" />
-              <button class="button small" type="submit">
+              <button class="button small quick-realization-button" type="submit">
                 <i data-lucide="check"></i>
                 <span>${escapeHtml(doneLabel)}</span>
               </button>
@@ -649,15 +1247,17 @@ function pendingItem(item, doneLabel) {
 
 function renderTransactions() {
   const finance = calculateFinance(state.data, state.month);
-  const records = filteredTransactions(finance.transactions);
+  const records = filteredTransactions(monthlyTransactionRecords(finance));
+  const filters = state.filters.transactions || { scope: "all", accountId: "", cardId: "", categoryId: "" };
   const editing = state.editing.transactions
     ? state.data.transactions.find((transaction) => transaction.id === state.editing.transactions)
     : null;
 
   return `
     <section class="module-page">
-      ${transactionQuickStats(finance)}
-      <section class="form-panel elevated" id="transactionForm">
+      ${transactionQuickStats(records)}
+      <section class="transactions-workspace">
+      <section class="form-panel elevated transactions-form-panel" id="transactionForm">
         <div class="panel-header">
           <div>
             <h2 class="panel-title">${editing ? "Editar movimentação" : "Novo lançamento"}</h2>
@@ -666,26 +1266,34 @@ function renderTransactions() {
         </div>
         ${transactionForm(editing)}
       </section>
-      <section class="table-panel">
+      <section class="table-panel transactions-list-panel">
         <div class="table-header">
           <div>
             <h3 class="table-title">Movimentações de ${escapeHtml(monthLabel(state.month))}</h3>
             <p class="table-subtitle">${records.length} lançamento(s) encontrados</p>
           </div>
         </div>
+        ${transactionFilters(filters)}
         ${transactionsTable(records)}
+      </section>
       </section>
     </section>
   `;
 }
 
-function transactionQuickStats(finance) {
+function transactionQuickStats(records) {
+  const income = records
+    .filter((record) => record.type === "income")
+    .reduce((total, record) => total + toNumber(record.amount), 0);
+  const expense = records
+    .filter((record) => record.type !== "income" && record.type !== "transfer")
+    .reduce((total, record) => total + (record.type === "card" ? cardInstallmentAmount(record) : toNumber(record.amount)), 0);
   return `
     <section class="module-summary">
-      <article class="mini-card"><span>Entradas realizadas</span><strong>${formatCurrency(finance.actualIncome)}</strong></article>
-      <article class="mini-card"><span>Saídas realizadas</span><strong>${formatCurrency(finance.actualExpense)}</strong></article>
-      <article class="mini-card"><span>Saldo real do mês</span><strong>${formatCurrency(finance.actualIncome - finance.actualExpense)}</strong></article>
-      <article class="mini-card"><span>Movimentações</span><strong>${finance.transactions.length}</strong></article>
+      <article class="mini-card"><span>Entradas</span><strong>${formatCurrency(income)}</strong></article>
+      <article class="mini-card"><span>Saídas</span><strong>${formatCurrency(expense)}</strong></article>
+      <article class="mini-card"><span>Saldo do mês</span><strong>${formatCurrency(income - expense)}</strong></article>
+      <article class="mini-card"><span>Movimentações</span><strong>${records.length}</strong></article>
     </section>
   `;
 }
@@ -704,7 +1312,7 @@ function transactionForm(record = {}) {
       </label>
       <label class="form-group">
         <span class="form-label">Valor</span>
-        <input name="amount" type="number" step="0.01" value="${escapeHtml(record?.amount || "")}" required />
+        <input name="amount" ${moneyInputAttributes()} value="${escapeHtml(record?.amount || "")}" required />
       </label>
       <label class="form-group">
         <span class="form-label">Data</span>
@@ -746,7 +1354,7 @@ function transactionForm(record = {}) {
       </label>
       <label class="form-group full">
         <span class="form-label">Observações</span>
-        <textarea name="notes">${escapeHtml(record?.notes || "")}</textarea>
+        <textarea name="notes">${escapeHtml(visibleNotes(record?.notes))}</textarea>
       </label>
       <div class="form-helper full">Responsável: ${escapeHtml(record?.createdBy ? memberName(record.createdBy) : currentUserName())}</div>
       <div class="form-actions">
@@ -761,17 +1369,123 @@ function transactionForm(record = {}) {
   `;
 }
 
+function plannedCardTransactionRows(cardData) {
+  return cardData.flatMap((card) =>
+    (card.plannedCharges || []).map((charge) => ({
+      id: `planned-card:${charge.id}`,
+      isVirtual: true,
+      type: "card",
+      description: charge.name,
+      amount: charge.amount,
+      date: charge.dueDate,
+      categoryId: charge.categoryId,
+      accountId: card.accountId || "",
+      cardId: card.id,
+      paymentMethod: "Cartão crédito · previsto",
+      installments: 1,
+      currentInstallment: 1,
+      status: "planned",
+    })),
+  );
+}
+
+function monthlyTransactionRecords(finance) {
+  return [...finance.transactions, ...plannedCardTransactionRows(finance.cardData)];
+}
+
+function spendingByCategoryForRecords(records) {
+  return records
+    .filter((record) => record.type !== "income" && record.type !== "transfer")
+    .reduce((totals, record) => {
+      const amount = record.type === "card" ? cardInstallmentAmount(record) : toNumber(record.amount);
+      totals.set(record.categoryId, (totals.get(record.categoryId) || 0) + amount);
+      return totals;
+    }, new Map());
+}
+
+function transactionFilters(filters) {
+  return `
+    <div class="transaction-filters">
+      <label class="filter-control">
+        <span class="filter-label">Visualizar</span>
+        <select data-transaction-filter="scope">
+          ${options(
+            [
+              { value: "all", label: "Todas" },
+              { value: "account", label: "Conta bancária" },
+              { value: "card", label: "Cartões" },
+            ],
+            filters.scope || "all",
+          )}
+        </select>
+      </label>
+      ${
+        filters.scope === "account"
+          ? `
+            <label class="filter-control">
+              <span class="filter-label">Conta</span>
+              <select data-transaction-filter="accountId">
+                <option value="">Todas as contas</option>
+                ${accountOptions(filters.accountId || "")}
+              </select>
+            </label>
+          `
+          : ""
+      }
+      ${
+        filters.scope === "card"
+          ? `
+            <label class="filter-control">
+              <span class="filter-label">Cartão</span>
+              <select data-transaction-filter="cardId">
+                <option value="">Todos os cartões</option>
+                ${cardOptions(filters.cardId || "")}
+              </select>
+            </label>
+          `
+          : ""
+      }
+      <label class="filter-control">
+        <span class="filter-label">Categoria</span>
+        <select data-transaction-filter="categoryId">
+          <option value="">Todas as categorias</option>
+          ${categoryOptions(filters.categoryId || "")}
+        </select>
+      </label>
+    </div>
+  `;
+}
+
 function filteredTransactions(transactions) {
+  const filters = state.filters.transactions || {};
+  const scope = filters.scope || "all";
   const query = normalize(state.query);
-  if (!query) return transactions;
-  return transactions.filter((transaction) =>
-    normalize(
+  return sortTransactions(transactions.filter((transaction) => {
+    if (scope === "account" && transaction.type === "card") return false;
+    if (scope === "account" && filters.accountId && transaction.accountId !== filters.accountId) return false;
+    if (scope === "card" && transaction.type !== "card") return false;
+    if (scope === "card" && filters.cardId && transaction.cardId !== filters.cardId) return false;
+    if (filters.categoryId && transaction.categoryId !== filters.categoryId) return false;
+    if (!query) return true;
+    return normalize(
       `${transaction.description} ${transaction.paymentMethod} ${getAccountName(state.data, transaction.accountId)} ${getCardName(
         state.data,
         transaction.cardId,
       )} ${getCategoryName(state.data, transaction.categoryId)}`,
-    ).includes(query),
-  );
+    ).includes(query);
+  }));
+}
+
+function sortTransactions(transactions) {
+  return [...transactions].sort((a, b) => {
+    const byDate = String(a.date || "").localeCompare(String(b.date || ""));
+    if (byDate) return byDate;
+    const byDescription = String(a.description || "").localeCompare(String(b.description || ""), "pt-BR", {
+      sensitivity: "base",
+    });
+    if (byDescription) return byDescription;
+    return String(a.id || "").localeCompare(String(b.id || ""));
+  });
 }
 
 function transactionsTable(records) {
@@ -782,11 +1496,9 @@ function transactionsTable(records) {
         <thead>
           <tr>
             <th>Movimentação</th>
-            <th>Tipo</th>
+            <th>Categoria</th>
             <th>Valor</th>
             <th>Data</th>
-            <th>Conta/cartão</th>
-            <th>Pagamento</th>
             <th>Ações</th>
           </tr>
         </thead>
@@ -798,28 +1510,50 @@ function transactionsTable(records) {
   `;
 }
 
+function categoryTag(categoryId) {
+  const name = getCategoryName(state.data, categoryId);
+  const color = getCategoryColor(state.data, categoryId);
+  return `
+    <span class="category-tag" style="--tag-color: ${escapeHtml(color)};">
+      <span class="category-tag-dot"></span>
+      ${escapeHtml(name)}
+    </span>
+  `;
+}
+
 function transactionRow(record) {
   const signedTone = record.type === "income" ? "positive" : "negative";
   const amount = record.type === "card" ? cardInstallmentAmount(record) : toNumber(record.amount);
-  const creator = memberName(record.createdBy);
+  const installments = Math.max(1, Math.trunc(toNumber(record.installments)) || 1);
+  const currentInstallment = Math.max(1, Math.trunc(toNumber(record.currentInstallment)) || 1);
+  const installmentLabel =
+    record.type === "card" && !record.isVirtual
+      ? installments > 1
+        ? `${currentInstallment}/${installments}`
+        : "À vista"
+      : "";
   return `
-    <tr>
+    <tr class="${record.isVirtual ? "is-virtual" : ""}">
       <td>
         <span class="cell-main">
           <strong>${escapeHtml(record.description)}</strong>
-          <span>${escapeHtml(getCategoryName(state.data, record.categoryId))}</span>
+          <span>${escapeHtml(record.paymentMethod || titleCase(record.type))}${installmentLabel ? ` · ${escapeHtml(installmentLabel)}` : ""}</span>
         </span>
       </td>
-      <td>${badge(titleCase(record.type), record.type === "income" ? "success" : record.type === "card" ? "warning" : "neutral")}</td>
+      <td>${categoryTag(record.categoryId)}</td>
       <td class="amount ${signedTone}">${formatCurrency(amount)}</td>
       <td>${formatDate(record.date)}</td>
-      <td>${escapeHtml(record.cardId ? getCardName(state.data, record.cardId) : getAccountName(state.data, record.accountId))}</td>
-      <td><span class="cell-main"><strong>${escapeHtml(record.paymentMethod || "-")}</strong><span>Criado por ${escapeHtml(creator)}</span></span></td>
       <td>
-        <div class="row-actions">
-          <button class="action-link" type="button" data-action="edit" data-collection="transactions" data-id="${record.id}"><i data-lucide="pencil"></i><span>Editar</span></button>
-          <button class="action-link" type="button" data-action="delete" data-collection="transactions" data-id="${record.id}"><i data-lucide="trash-2"></i><span>Excluir</span></button>
-        </div>
+        ${
+          record.isVirtual
+            ? badge("Previsto", "warning")
+            : `
+              <div class="row-actions">
+                <button class="action-link" type="button" data-action="edit" data-collection="transactions" data-id="${record.id}"><i data-lucide="pencil"></i><span>Editar</span></button>
+                <button class="action-link" type="button" data-action="delete" data-collection="transactions" data-id="${record.id}"><i data-lucide="trash-2"></i><span>Excluir</span></button>
+              </div>
+            `
+        }
       </td>
     </tr>
   `;
@@ -874,9 +1608,9 @@ function accountForm(record = {}) {
       <label class="form-group wide"><span class="form-label">Nome</span><input name="name" value="${escapeHtml(record.name || "")}" required /></label>
       <label class="form-group"><span class="form-label">Instituição</span><input name="institution" value="${escapeHtml(record.institution || "")}" /></label>
       <label class="form-group"><span class="form-label">Tipo</span><input name="type" value="${escapeHtml(record.type || "Conta secundária")}" /></label>
-      <label class="form-group"><span class="form-label">Saldo atual</span><input name="balance" type="number" step="0.01" value="${escapeHtml(record.balance || "")}" required /></label>
+      <label class="form-group"><span class="form-label">Saldo atual</span><input name="balance" ${moneyInputAttributes()} value="${escapeHtml(record.balance || "")}" required /></label>
       <label class="form-group"><span class="form-label">Principal</span><span class="checkbox-row"><input name="isPrimary" type="checkbox" ${record.isPrimary ? "checked" : ""} /><span>Sim</span></span></label>
-      <label class="form-group full"><span class="form-label">Observações</span><textarea name="notes">${escapeHtml(record.notes || "")}</textarea></label>
+      <label class="form-group full"><span class="form-label">Observações</span><textarea name="notes">${escapeHtml(visibleNotes(record.notes))}</textarea></label>
       <div class="form-actions">
         ${record.id ? `<button class="button ghost" type="button" data-action="cancel-edit" data-collection="accounts"><i data-lucide="x"></i><span>Cancelar</span></button>` : ""}
         <button class="button" type="submit"><i data-lucide="save"></i><span>${record.id ? "Salvar conta" : "Adicionar conta"}</span></button>
@@ -906,6 +1640,7 @@ function renderCards() {
 }
 
 function cardPanel(card) {
+  const invoiceRows = cardInvoiceRows(card);
   return `
     <article class="credit-panel">
       <div class="credit-header">
@@ -931,19 +1666,19 @@ function cardPanel(card) {
       </div>
       <div class="purchase-list">
         ${
-          card.purchases.length
-            ? card.purchases
+          invoiceRows.length
+            ? invoiceRows
                 .slice(0, 6)
                 .map(
-                  (purchase) => `
-                    <div class="purchase-row">
-                      <span><strong>${escapeHtml(purchase.description)}</strong><small>${escapeHtml(getCategoryName(state.data, purchase.categoryId))}</small></span>
-                      <b>${formatCurrency(cardInstallmentAmount(purchase))}</b>
+                  (row) => `
+                    <div class="purchase-row ${row.isPlanned ? "is-planned" : ""}">
+                      <span><strong>${escapeHtml(row.description)}</strong><small>${escapeHtml(row.detail)}</small></span>
+                      <b>${formatCurrency(row.amount)}</b>
                     </div>
                   `,
                 )
                 .join("")
-            : `<div class="empty-state compact">Nenhuma compra cadastrada.</div>`
+            : `<div class="empty-state compact">Nenhuma cobrança nesta fatura.</div>`
         }
       </div>
       <div class="row-actions">
@@ -954,12 +1689,30 @@ function cardPanel(card) {
   `;
 }
 
+function cardInvoiceRows(card) {
+  const realRows = (card.monthPurchases || []).map((purchase) => ({
+    description: purchase.description,
+    detail: getCategoryName(state.data, purchase.categoryId),
+    amount: cardInstallmentAmount(purchase),
+    date: purchase.date,
+    isPlanned: false,
+  }));
+  const plannedRows = (card.plannedCharges || []).map((charge) => ({
+    description: charge.name,
+    detail: `${getCategoryName(state.data, charge.categoryId)} · previsto`,
+    amount: charge.amount,
+    date: charge.dueDate,
+    isPlanned: true,
+  }));
+  return [...realRows, ...plannedRows].sort((a, b) => String(a.date).localeCompare(String(b.date)));
+}
+
 function cardForm(record = {}) {
   return `
     <form class="record-form" data-form="card">
       <label class="form-group wide"><span class="form-label">Nome</span><input name="name" value="${escapeHtml(record.name || "")}" required /></label>
       <label class="form-group"><span class="form-label">Conta vinculada</span><select name="accountId">${accountOptions(record.accountId || "", true)}</select></label>
-      <label class="form-group"><span class="form-label">Limite total</span><input name="limitTotal" type="number" step="0.01" value="${escapeHtml(record.limitTotal || "")}" required /></label>
+      <label class="form-group"><span class="form-label">Limite total</span><input name="limitTotal" ${moneyInputAttributes()} value="${escapeHtml(record.limitTotal || "")}" required /></label>
       <label class="form-group"><span class="form-label">Fechamento</span><input name="closingDay" type="number" min="1" max="31" value="${escapeHtml(record.closingDay || 1)}" required /></label>
       <label class="form-group"><span class="form-label">Vencimento</span><input name="dueDay" type="number" min="1" max="31" value="${escapeHtml(record.dueDay || 1)}" required /></label>
       <label class="form-group"><span class="form-label">Status</span><select name="status">${options(["aberta", "fechada", "paga", "atrasada"].map((status) => ({ value: status, label: titleCase(status) })), record.status || "aberta")}</select></label>
@@ -976,7 +1729,7 @@ function cardPurchaseForm() {
   return `
     <form class="record-form" data-form="card-purchase">
       <label class="form-group wide"><span class="form-label">Descrição</span><input name="description" required /></label>
-      <label class="form-group"><span class="form-label">Valor</span><input name="amount" type="number" step="0.01" required /></label>
+      <label class="form-group"><span class="form-label">Valor</span><input name="amount" ${moneyInputAttributes()} required /></label>
       <label class="form-group"><span class="form-label">Parcelas</span><input name="installments" type="number" min="1" value="1" /></label>
       <label class="form-group"><span class="form-label">Categoria</span><select name="categoryId">${categoryOptions("", "expense")}</select></label>
       <label class="form-group"><span class="form-label">Data</span><input name="date" type="date" value="${state.month}-01" required /></label>
@@ -988,24 +1741,81 @@ function cardPurchaseForm() {
 }
 
 function renderPlanning() {
-  const finance = calculateFinance(state.data, state.month);
   const editing = state.editing.planning_items
     ? state.data.planningItems.find((item) => item.id === state.editing.planning_items)
     : null;
   return `
     <section class="module-page">
-      <section class="planning-sections">
-        ${planningGroup("Receitas recorrentes", "income")}
-        ${planningGroup("Despesas recorrentes", "expense")}
-        ${planningGroup("Assinaturas", "subscription")}
-        ${marketPlanning(finance)}
-      </section>
-      <section class="form-panel elevated" id="planningForm">
-        <div class="panel-header"><div><h2 class="panel-title">${editing ? "Editar planejamento" : "Novo item de planejamento"}</h2><p class="panel-subtitle">Itens ativos geram pendências automaticamente todos os meses.</p></div></div>
-        ${planningForm(editing || {})}
+      <section class="planning-workspace">
+        <section class="form-panel elevated planning-form-panel" id="planningForm">
+          <div class="panel-header"><div><h2 class="panel-title">${editing ? "Editar compromisso" : "Novo compromisso"}</h2><p class="panel-subtitle">Cadastre aqui apenas estruturas recorrentes. O dia a dia usa o botão Adicionar.</p></div></div>
+          ${planningForm(editing || {})}
+        </section>
+        <section class="panel planning-list-panel">
+          <div class="panel-header"><div><h2 class="panel-title">Compromissos cadastrados</h2><p class="panel-subtitle">${state.data.planningItems.length} item(ns) recorrentes</p></div></div>
+          <div class="planning-scroll">
+            ${planningList()}
+          </div>
+        </section>
       </section>
     </section>
   `;
+}
+
+function planningList() {
+  const items = [...state.data.planningItems].sort((a, b) => {
+    if (a.active !== b.active) return a.active ? -1 : 1;
+    return Number(a.day || 0) - Number(b.day || 0);
+  });
+  if (!items.length) return `<div class="empty-state compact">Nenhum item cadastrado.</div>`;
+  return `
+    <table class="data-table planning-table">
+      <thead>
+        <tr>
+          <th>Planejamento</th>
+          <th>Categoria</th>
+          <th>Valor</th>
+          <th>Dia</th>
+          <th>Status</th>
+          <th>Ações</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${items
+          .map(
+            (item) => `
+              <tr>
+                <td>
+                  <div class="cell-main">
+                  <strong>${escapeHtml(item.name)}</strong>
+                  <span>${escapeHtml(item.paymentMethod)} · ${escapeHtml(commitmentDetail(item))}</span>
+                  </div>
+                </td>
+                <td>${categoryTag(item.categoryId)}</td>
+                <td><strong class="amount ${item.type === "income" ? "positive" : "negative"}">${formatCurrency(item.amount)}</strong></td>
+                <td>Dia ${item.day}</td>
+                <td>${badge(item.active ? "Ativo" : "Inativo", item.active ? "success" : "neutral")}</td>
+                <td>
+                  <div class="row-actions">
+                    <button class="action-link" type="button" data-action="edit" data-collection="planning_items" data-id="${item.id}"><i data-lucide="pencil"></i><span>Editar</span></button>
+                    <button class="action-link" type="button" data-action="toggle-active" data-id="${item.id}"><i data-lucide="${item.active ? "pause" : "play"}"></i><span>${item.active ? "Desativar" : "Ativar"}</span></button>
+                    <button class="action-link" type="button" data-action="delete" data-collection="planning_items" data-id="${item.id}"><i data-lucide="trash-2"></i><span>Excluir</span></button>
+                  </div>
+                </td>
+              </tr>
+            `,
+          )
+          .join("")}
+      </tbody>
+    </table>
+  `;
+}
+
+function commitmentDetail(item) {
+  const meta = parseFinanceMeta(item.notes);
+  if (!meta.startMonth) return "todo mês";
+  const duration = toNumber(meta.totalOccurrences) > 0 ? `${toNumber(meta.totalOccurrences)} meses` : "sem data para terminar";
+  return `desde ${monthLabel(meta.startMonth)} · ${duration}`;
 }
 
 function planningGroup(title, group) {
@@ -1095,7 +1905,7 @@ function marketGroupForm(record = {}) {
   return `
     <form class="record-form compact-form" id="marketGroupForm" data-form="market-group">
       <label class="form-group wide"><span class="form-label">Grupo de mercado</span><input name="name" value="${escapeHtml(record.name || "")}" required /></label>
-      <label class="form-group"><span class="form-label">Previsão</span><input name="forecast" type="number" step="0.01" value="${escapeHtml(record.forecast || "")}" required /></label>
+      <label class="form-group"><span class="form-label">Previsão</span><input name="forecast" ${moneyInputAttributes()} value="${escapeHtml(record.forecast || "")}" required /></label>
       <div class="form-actions">
         ${record.id ? `<button class="button ghost" type="button" data-action="cancel-edit" data-collection="market_groups"><i data-lucide="x"></i><span>Cancelar</span></button>` : ""}
         <button class="button secondary" type="submit"><i data-lucide="save"></i><span>${record.id ? "Salvar grupo" : "Adicionar grupo"}</span></button>
@@ -1108,7 +1918,7 @@ function marketHistoryForm(record = {}) {
   return `
     <form class="record-form compact-form" id="marketHistoryForm" data-form="market-history">
       <label class="form-group"><span class="form-label">Mês</span><input name="month" type="month" value="${escapeHtml(record.month || state.month)}" required /></label>
-      <label class="form-group"><span class="form-label">Valor real</span><input name="amount" type="number" step="0.01" value="${escapeHtml(record.amount || "")}" required /></label>
+      <label class="form-group"><span class="form-label">Valor real</span><input name="amount" ${moneyInputAttributes()} value="${escapeHtml(record.amount || "")}" required /></label>
       <label class="form-group wide"><span class="form-label">Observações</span><input name="notes" value="${escapeHtml(record.notes || "")}" /></label>
       <div class="form-actions">
         ${record.id ? `<button class="button ghost" type="button" data-action="cancel-edit" data-collection="market_history"><i data-lucide="x"></i><span>Cancelar</span></button>` : ""}
@@ -1121,17 +1931,15 @@ function marketHistoryForm(record = {}) {
 function planningForm(record = {}) {
   return `
     <form class="record-form" data-form="planning">
-      <label class="form-group"><span class="form-label">Grupo</span><select name="group">${options(planningGroups.map((group) => ({ value: group, label: titleCase(group) })), record.group || "expense")}</select></label>
-      <label class="form-group"><span class="form-label">Tipo</span><select name="type">${options([{ value: "income", label: "Receita" }, { value: "expense", label: "Despesa" }], record.type || "expense")}</select></label>
       <label class="form-group wide"><span class="form-label">Nome</span><input name="name" value="${escapeHtml(record.name || "")}" required /></label>
-      <label class="form-group"><span class="form-label">Valor previsto</span><input name="amount" type="number" step="0.01" value="${escapeHtml(record.amount || "")}" required /></label>
+      <label class="form-group"><span class="form-label">Valor previsto</span><input name="amount" ${moneyInputAttributes()} value="${escapeHtml(record.amount || "")}" required /></label>
       <label class="form-group"><span class="form-label">Dia</span><input name="day" type="number" min="1" max="31" value="${escapeHtml(record.day || "")}" required /></label>
       <label class="form-group"><span class="form-label">Categoria</span><select name="categoryId">${categoryOptions(record.categoryId || "")}</select></label>
       <label class="form-group"><span class="form-label">Conta</span><select name="accountId">${accountOptions(record.accountId || state.data.settings.mainAccountId, true)}</select></label>
       <label class="form-group"><span class="form-label">Pagamento</span><select name="paymentMethod">${options(paymentMethods, record.paymentMethod || "PIX")}</select></label>
       <label class="form-group"><span class="form-label">Cartão</span><select name="cardId">${cardOptions(record.cardId || "", true)}</select></label>
       <label class="form-group"><span class="form-label">Ativo</span><span class="checkbox-row"><input name="active" type="checkbox" ${record.active ?? true ? "checked" : ""} /><span>Sim</span></span></label>
-      <label class="form-group full"><span class="form-label">Observações</span><textarea name="notes">${escapeHtml(record.notes || "")}</textarea></label>
+      <label class="form-group full"><span class="form-label">Observações</span><textarea name="notes">${escapeHtml(visibleNotes(record.notes))}</textarea></label>
       <div class="form-actions">
         ${record.id ? `<button class="button ghost" type="button" data-action="cancel-edit" data-collection="planning_items"><i data-lucide="x"></i><span>Cancelar</span></button>` : ""}
         <button class="button" type="submit"><i data-lucide="save"></i><span>${record.id ? "Salvar planejamento" : "Adicionar planejamento"}</span></button>
@@ -1192,7 +2000,7 @@ function investmentForm(record = {}) {
     <form class="record-form" data-form="investment">
       <label class="form-group wide"><span class="form-label">Nome</span><input name="name" value="${escapeHtml(record.name || "")}" required /></label>
       <label class="form-group"><span class="form-label">Tipo</span><input name="type" value="${escapeHtml(record.type || "Renda fixa")}" required /></label>
-      <label class="form-group"><span class="form-label">Valor</span><input name="amount" type="number" step="0.01" value="${escapeHtml(record.amount || "")}" required /></label>
+      <label class="form-group"><span class="form-label">Valor</span><input name="amount" ${moneyInputAttributes()} value="${escapeHtml(record.amount || "")}" required /></label>
       <label class="form-group"><span class="form-label">Rend. estimado (%)</span><input name="estimatedYield" type="number" step="0.01" value="${escapeHtml(record.estimatedYield || "")}" /></label>
       <label class="form-group"><span class="form-label">Rend. real (%)</span><input name="realYield" type="number" step="0.01" value="${escapeHtml(record.realYield || "")}" /></label>
       <label class="form-group"><span class="form-label">Instituição</span><input name="institution" value="${escapeHtml(record.institution || "")}" /></label>
@@ -1205,6 +2013,107 @@ function investmentForm(record = {}) {
         <button class="button" type="submit"><i data-lucide="save"></i><span>${record.id ? "Salvar investimento" : "Adicionar investimento"}</span></button>
       </div>
     </form>
+  `;
+}
+
+function renderGoals() {
+  const finance = calculateFinance(state.data, state.month);
+  const categories = finance.categoryBudgets;
+  const totalGoal = categories.reduce((total, category) => total + toNumber(category.budget), 0);
+  const totalSpent = categories.reduce((total, category) => total + category.spent, 0);
+  const totalCommitted = categories.reduce((total, category) => total + category.committed, 0);
+  const exceededGoals = categories.filter((category) => category.exceeded > 0).length;
+
+  return `
+    <section class="module-page">
+      <section class="module-summary">
+        <article class="mini-card"><span>Gasto no mês</span><strong>${formatCurrency(totalSpent)}</strong></article>
+        <article class="mini-card"><span>Já comprometido</span><strong>${formatCurrency(totalCommitted)}</strong></article>
+        <article class="mini-card"><span>Meta total</span><strong>${formatCurrency(totalGoal)}</strong></article>
+        <article class="mini-card"><span>Disponível</span><strong>${formatCurrency(Math.max(0, totalGoal - totalSpent - totalCommitted))}</strong><small>${exceededGoals ? `${exceededGoals} acima da meta` : "Todas sob controle"}</small></article>
+      </section>
+
+      <section class="goals-list">
+        ${
+          categories.length
+            ? categories.map((category) => goalRow(category)).join("")
+            : `<div class="empty-state">Nenhuma categoria de gasto cadastrada.</div>`
+        }
+      </section>
+    </section>
+  `;
+}
+
+function goalRow(category) {
+  const goal = toNumber(category.budget);
+  const spent = category.spent;
+  const committed = category.committed;
+  const used = spent + committed;
+  const remaining = goal - used;
+  const progress = goal > 0 ? used / goal : 0;
+  const progressWidth = Math.min(100, progress * 100);
+  const status =
+    goal <= 0
+      ? { label: "Sem meta", variant: "neutral" }
+      : used > goal
+        ? { label: "Meta excedida", variant: "danger" }
+        : used === goal
+          ? { label: "Meta atingida", variant: "warning" }
+        : progress >= 0.8
+          ? { label: "Próximo da meta", variant: "warning" }
+          : { label: "Dentro da meta", variant: "success" };
+
+  return `
+    <article class="goal-row">
+      <div class="goal-heading">
+        <span class="legend-dot" style="background:${escapeHtml(category.color)}"></span>
+        <div>
+          <strong>${escapeHtml(category.name)}</strong>
+          <span>${escapeHtml(monthLabel(state.month))}</span>
+        </div>
+      </div>
+
+      <div class="goal-overview">
+        <div class="goal-values">
+          <span><small>Gasto</small><strong>${formatCurrency(spent)}</strong></span>
+          <span><small>Comprometido</small><strong>${formatCurrency(committed)}</strong></span>
+          <span><small>Meta</small><strong>${goal > 0 ? formatCurrency(goal) : "Não definida"}</strong></span>
+          <span>
+            <small>${remaining >= 0 ? "Restante" : "Excedido"}</small>
+            <strong class="${remaining < 0 ? "negative" : ""}">${goal > 0 ? formatCurrency(Math.abs(remaining)) : "—"}</strong>
+          </span>
+        </div>
+        <div class="goal-progress">
+          <div class="progress-meta">
+            <span>Progresso mensal</span>
+            <strong>${goal > 0 ? formatPercent(progress) : "Sem limite"}</strong>
+          </div>
+          <div class="progress-track">
+            <div class="progress-fill ${used > goal && goal > 0 ? "is-over" : ""}" style="width:${progressWidth}%;background:${escapeHtml(category.color)}"></div>
+          </div>
+          <div class="goal-status">
+            ${badge(status.label, status.variant)}
+          </div>
+        </div>
+      </div>
+
+      <details class="goal-settings">
+        <summary>
+          <i data-lucide="settings-2"></i>
+          <span>Ajustar meta</span>
+        </summary>
+        <form class="goal-form" data-form="goal" data-category-id="${escapeHtml(category.id)}">
+          <label class="form-group">
+            <span class="form-label">Meta mensal</span>
+            <input name="budget" ${moneyInputAttributes()} value="${escapeHtml(goal || "")}" aria-label="Meta mensal de ${escapeHtml(category.name)}" />
+          </label>
+          <button class="button small" type="submit">
+            <i data-lucide="save"></i>
+            <span>Salvar</span>
+          </button>
+        </form>
+      </details>
+    </article>
   `;
 }
 
@@ -1246,7 +2155,7 @@ function categoryForm(record = {}) {
     <form class="record-form" data-form="category">
       <label class="form-group wide"><span class="form-label">Nome</span><input name="name" value="${escapeHtml(record.name || "")}" required /></label>
       <label class="form-group"><span class="form-label">Tipo</span><select name="type">${options(["income", "expense", "investment", "mixed"].map((type) => ({ value: type, label: titleCase(type) })), record.type || "expense")}</select></label>
-      <label class="form-group"><span class="form-label">Orçamento mensal</span><input name="budget" type="number" step="0.01" value="${escapeHtml(record.budget || "")}" /></label>
+      <label class="form-group"><span class="form-label">Orçamento mensal</span><input name="budget" ${moneyInputAttributes()} value="${escapeHtml(record.budget || "")}" /></label>
       <label class="form-group"><span class="form-label">Cor</span><input name="color" type="color" value="${escapeHtml(record.color || "#0f766e")}" /></label>
       <div class="form-actions">
         ${record.id ? `<button class="button ghost" type="button" data-action="cancel-edit" data-collection="categories"><i data-lucide="x"></i><span>Cancelar</span></button>` : ""}
@@ -1286,7 +2195,7 @@ function renderSettings() {
         <form class="record-form" data-form="settings">
           <label class="form-group"><span class="form-label">Conta principal</span><select name="mainAccountId">${accountOptions(state.data.settings.mainAccountId)}</select></label>
           <label class="form-group"><span class="form-label">Alerta de orçamento (%)</span><input name="highSpendingAlertRate" type="number" step="0.01" value="${escapeHtml(state.data.settings.highSpendingAlertRate)}" /></label>
-          <label class="form-group"><span class="form-label">Mercado padrão</span><input name="defaultMarketForecast" type="number" step="0.01" value="${escapeHtml(state.data.settings.defaultMarketForecast)}" /></label>
+          <label class="form-group"><span class="form-label">Mercado padrão</span><input name="defaultMarketForecast" ${moneyInputAttributes()} value="${escapeHtml(state.data.settings.defaultMarketForecast)}" /></label>
           <label class="form-group"><span class="form-label">Meses para média</span><input name="forecastMonths" type="number" min="1" value="${escapeHtml(state.data.settings.forecastMonths)}" /></label>
           <div class="form-actions"><button class="button" type="submit"><i data-lucide="save"></i><span>Salvar configurações</span></button></div>
         </form>
@@ -1305,7 +2214,46 @@ function renderSettings() {
 
 function readForm(form) {
   const formData = new FormData(form);
-  return Object.fromEntries(formData.entries());
+  const raw = Object.fromEntries(formData.entries());
+  form.querySelectorAll("[data-money-input]").forEach((input) => {
+    raw[input.name] = parseMoneyInput(input.value);
+  });
+  return raw;
+}
+
+function parseMoneyInput(value) {
+  const cleaned = String(value || "").replace(/[^\d,.-]/g, "");
+  const hasComma = cleaned.includes(",");
+  const hasDot = cleaned.includes(".");
+  let normalized = cleaned;
+  if (hasComma && hasDot) {
+    normalized = cleaned.replace(/\./g, "").replace(",", ".");
+  } else if (hasComma) {
+    normalized = cleaned.replace(",", ".");
+  }
+  const number = Number(normalized);
+  return Number.isFinite(number) ? String(number) : "";
+}
+
+function moneyInputAttributes() {
+  return `type="text" inputmode="decimal" data-money-input`;
+}
+
+function formatMoneyInput(input) {
+  const raw = parseMoneyInput(input.value);
+  if (!raw) return;
+  input.value = formatCurrency(Number(raw));
+}
+
+function editMoneyInput(input) {
+  const raw = parseMoneyInput(input.value);
+  if (!raw) return;
+  input.value = raw.replace(".", ",");
+  input.select();
+}
+
+function formatMoneyInputs(root = appRoot) {
+  root.querySelectorAll("[data-money-input]").forEach(formatMoneyInput);
 }
 
 function normalizeTransaction(raw, previous = {}) {
@@ -1327,7 +2275,9 @@ function normalizeTransaction(raw, previous = {}) {
     installments: Math.max(1, toNumber(raw.installments) || 1),
     currentInstallment: Math.max(1, toNumber(raw.currentInstallment) || 1),
     status: "confirmed",
-    notes: raw.notes?.trim() || "",
+    notes: Object.keys(parseFinanceMeta(previous.notes)).length
+      ? withFinanceMeta(raw.notes, parseFinanceMeta(previous.notes))
+      : raw.notes?.trim() || "",
   };
 }
 
@@ -1351,29 +2301,68 @@ function transactionFromOccurrence(plan, raw) {
   };
 }
 
+function transactionFromCardInvoice(card, invoiceId, raw) {
+  return {
+    id: uid("tx"),
+    type: "transfer",
+    description: `Pagamento da fatura ${card.name}`,
+    amount: toNumber(raw.amount),
+    date: raw.date,
+    categoryId: "",
+    accountId: card.accountId || "",
+    fromAccountId: card.accountId || "",
+    toAccountId: "",
+    cardId: card.id,
+    paymentMethod: "Pagamento de fatura",
+    linkedPlanningId: "",
+    installments: 1,
+    currentInstallment: 1,
+    status: "confirmed",
+    notes: [invoiceId, raw.notes?.trim()].filter(Boolean).join(" · "),
+  };
+}
+
+function inferPlanningKind(raw, previous = {}) {
+  const category = state.data.categories.find((item) => item.id === raw.categoryId);
+  const type = category?.type === "income" ? "income" : previous.type || "expense";
+  const group = type === "income" ? "income" : previous.group === "subscription" ? "subscription" : "expense";
+  return { group, type };
+}
+
 async function handleFormSubmit(form) {
   const kind = form.dataset.form;
   const raw = readForm(form);
   const householdId = state.householdId;
   const userId = state.user?.id;
 
+  if (kind === "goal") {
+    const category = state.data.categories.find((item) => item.id === form.dataset.categoryId);
+    if (!category) return;
+    await dbUpdate(
+      "categories",
+      category.id,
+      toDbCategory({ ...category, budget: Math.max(0, toNumber(raw.budget)) }, householdId, userId),
+    );
+    await persist(`Meta de ${category.name} atualizada.`);
+  }
+
   if (kind === "transaction") {
     const editingId = state.editing.transactions;
     const previous = editingId ? state.data.transactions.find((item) => item.id === editingId) : {};
     const payload = toDbTransaction(normalizeTransaction(raw, previous), householdId, userId);
     if (editingId) {
-      await updateRemote("transactions", editingId, payload);
+      await dbUpdate("transactions", editingId, payload);
       state.editing.transactions = "";
       await persist("Movimentação atualizada.");
     } else {
-      await insertRemote("transactions", payload);
+      await dbInsert("transactions", payload);
       await persist("Movimentação criada.");
     }
   }
 
   if (kind === "card-purchase") {
     const card = state.data.cards.find((item) => item.id === raw.cardId);
-    await insertRemote("transactions", toDbTransaction({
+    await dbInsert("transactions", toDbTransaction({
       type: "card",
       description: raw.description.trim(),
       amount: toNumber(raw.amount),
@@ -1386,7 +2375,7 @@ async function handleFormSubmit(form) {
       installments: Math.max(1, toNumber(raw.installments) || 1),
       currentInstallment: 1,
       status: "confirmed",
-      notes: raw.notes?.trim() || "",
+      notes: withFinanceMeta(raw.notes, { source: "card-form", invoiceMonth: firstCardInvoiceMonth(card, raw.date) }),
     }, householdId, userId));
     await persist("Compra adicionada ao cartão.");
   }
@@ -1405,11 +2394,11 @@ async function handleFormSubmit(form) {
       notes: raw.notes?.trim() || "",
     }, householdId, userId);
     if (editingId) {
-      await updateRemote("cards", editingId, payload);
+      await dbUpdate("cards", editingId, payload);
       state.editing.cards = "";
       await persist("Cartão atualizado.");
     } else {
-      await insertRemote("cards", payload);
+      await dbInsert("cards", payload);
       await persist("Cartão criado.");
     }
   }
@@ -1417,10 +2406,11 @@ async function handleFormSubmit(form) {
   if (kind === "planning") {
     const editingId = state.editing.planning_items;
     const previous = editingId ? state.data.planningItems.find((item) => item.id === editingId) : {};
+    const planningKind = inferPlanningKind(raw, previous);
     const payload = toDbPlanning({
       ...previous,
-      group: raw.group,
-      type: raw.type,
+      group: planningKind.group,
+      type: planningKind.type,
       name: raw.name.trim(),
       amount: toNumber(raw.amount),
       recurrence: "monthly",
@@ -1430,14 +2420,16 @@ async function handleFormSubmit(form) {
       paymentMethod: raw.paymentMethod,
       cardId: raw.cardId || "",
       active: Boolean(raw.active),
-      notes: raw.notes?.trim() || "",
+      notes: Object.keys(parseFinanceMeta(previous.notes)).length
+        ? withFinanceMeta(raw.notes, parseFinanceMeta(previous.notes))
+        : raw.notes?.trim() || "",
     }, householdId, userId);
     if (editingId) {
-      await updateRemote("planning_items", editingId, payload);
+      await dbUpdate("planning_items", editingId, payload);
       state.editing.planning_items = "";
       await persist("Planejamento atualizado.");
     } else {
-      await insertRemote("planning_items", payload);
+      await dbInsert("planning_items", payload);
       await persist("Planejamento recorrente criado.");
     }
   }
@@ -1455,11 +2447,11 @@ async function handleFormSubmit(form) {
       notes: raw.notes?.trim() || "",
     }, householdId, userId);
     if (editingId) {
-      await updateRemote("accounts", editingId, payload);
+      await dbUpdate("accounts", editingId, payload);
       state.editing.accounts = "";
       await persist("Conta atualizada.");
     } else {
-      await insertRemote("accounts", payload);
+      await dbInsert("accounts", payload);
       await persist("Conta adicionada.");
     }
   }
@@ -1475,11 +2467,11 @@ async function handleFormSubmit(form) {
       budget: toNumber(raw.budget),
     }, householdId, userId);
     if (editingId) {
-      await updateRemote("categories", editingId, payload);
+      await dbUpdate("categories", editingId, payload);
       state.editing.categories = "";
       await persist("Categoria atualizada.");
     } else {
-      await insertRemote("categories", payload);
+      await dbInsert("categories", payload);
       await persist("Categoria adicionada.");
     }
   }
@@ -1501,11 +2493,11 @@ async function handleFormSubmit(form) {
       notes: raw.notes?.trim() || "",
     }, householdId, userId);
     if (editingId) {
-      await updateRemote("investments", editingId, payload);
+      await dbUpdate("investments", editingId, payload);
       state.editing.investments = "";
       await persist("Investimento atualizado.");
     } else {
-      await insertRemote("investments", payload);
+      await dbInsert("investments", payload);
       await persist("Investimento adicionado.");
     }
   }
@@ -1519,11 +2511,11 @@ async function handleFormSubmit(form) {
       forecast: toNumber(raw.forecast),
     }, householdId, userId);
     if (editingId) {
-      await updateRemote("market_groups", editingId, payload);
+      await dbUpdate("market_groups", editingId, payload);
       state.editing.market_groups = "";
       await persist("Grupo de mercado atualizado.");
     } else {
-      await insertRemote("market_groups", payload);
+      await dbInsert("market_groups", payload);
       await persist("Grupo de mercado adicionado.");
     }
   }
@@ -1538,11 +2530,11 @@ async function handleFormSubmit(form) {
       notes: raw.notes?.trim() || "",
     }, householdId, userId);
     if (editingId) {
-      await updateRemote("market_history", editingId, payload);
+      await dbUpdate("market_history", editingId, payload);
       state.editing.market_history = "";
       await persist("Histórico de mercado atualizado.");
     } else {
-      await insertRemote("market_history", payload);
+      await dbInsert("market_history", payload);
       await persist("Histórico de mercado adicionado.");
     }
   }
@@ -1554,22 +2546,32 @@ async function handleFormSubmit(form) {
       defaultMarketForecast: toNumber(raw.defaultMarketForecast),
       forecastMonths: Math.max(1, toNumber(raw.forecastMonths)),
     };
-    await updateRemote("household_settings", householdId, toDbSettings(settings), "household_id");
+    await dbUpdate("household_settings", householdId, toDbSettings(settings), "household_id");
     await persist("Configurações salvas.");
   }
 }
 
-document.querySelector("#menuToggle").addEventListener("click", () => {
-  sidebar.classList.toggle("open");
-});
+function setSidebarOpen(open) {
+  sidebar.classList.toggle("open", open);
+  document.body.classList.toggle("sidebar-open", open);
+  menuToggle.setAttribute("aria-expanded", String(open));
+}
+
+menuToggle.addEventListener("click", () => setSidebarOpen(!sidebar.classList.contains("open")));
+sidebarClose.addEventListener("click", () => setSidebarOpen(false));
+sidebarBackdrop.addEventListener("click", () => setSidebarOpen(false));
 
 sidebarNav.addEventListener("click", async (event) => {
   const actionButton = event.target.closest("[data-action]");
   if (actionButton?.dataset.action === "logout") {
+    if (LOCAL_AUTH_BYPASS) {
+      showToast("Modo local temporário ativo.");
+      return;
+    }
     await signOut();
     resetAuthenticatedState();
     setRoute("dashboard", true);
-    sidebar.classList.remove("open");
+    setSidebarOpen(false);
     render();
     return;
   }
@@ -1579,7 +2581,7 @@ sidebarNav.addEventListener("click", async (event) => {
   setRoute(button.dataset.route, false);
   state.editing = {};
   window.location.hash = `#/${state.route}`;
-  sidebar.classList.remove("open");
+  setSidebarOpen(false);
   render();
 });
 
@@ -1598,7 +2600,62 @@ document.querySelector("#monthToday").addEventListener("click", () => {
   setMonth(currentMonth());
 });
 
+quickAddButton.addEventListener("click", () => {
+  state.quickAddOpen = true;
+  state.quickAddPreset = null;
+  renderQuickAddModal();
+});
+
+modalRoot.addEventListener("click", (event) => {
+  const close = event.target.closest('[data-action="close-quick-add"]');
+  if (!close) return;
+  if (close.classList.contains("modal-backdrop") && event.target !== close) return;
+  state.quickAddOpen = false;
+  state.quickAddPreset = null;
+  renderQuickAddModal();
+});
+
+modalRoot.addEventListener("change", (event) => {
+  if (event.target.closest('[data-form="universal-entry"]')) updateUniversalFormVisibility();
+});
+
+modalRoot.addEventListener("submit", async (event) => {
+  const form = event.target.closest('[data-form="universal-entry"]');
+  if (!form) return;
+  event.preventDefault();
+  const submitter = event.submitter;
+  form.querySelectorAll("button").forEach((button) => { button.disabled = true; });
+  try {
+    await saveUniversalEntry(form, submitter?.dataset.keepOpen === "true");
+  } catch (error) {
+    console.error(error);
+    showToast(error.message || "Não foi possível salvar.");
+    form.querySelectorAll("button").forEach((button) => { button.disabled = false; });
+  }
+});
+
+modalRoot.addEventListener("focus", (event) => {
+  const input = event.target.closest?.("[data-money-input]");
+  if (input) editMoneyInput(input);
+}, true);
+
+modalRoot.addEventListener("blur", (event) => {
+  const input = event.target.closest?.("[data-money-input]");
+  if (input) formatMoneyInput(input);
+}, true);
+
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  if (state.quickAddOpen) {
+    state.quickAddOpen = false;
+    state.quickAddPreset = null;
+    renderQuickAddModal();
+  }
+  if (sidebar.classList.contains("open")) setSidebarOpen(false);
+});
+
 appRoot.addEventListener("submit", async (event) => {
+  pendingScrollRestore = captureScrollState(document.activeElement);
   const authForm = event.target.closest('[data-form="auth-login"]');
   if (authForm) {
     event.preventDefault();
@@ -1613,6 +2670,30 @@ appRoot.addEventListener("submit", async (event) => {
       console.error(error);
       showToast(authErrorMessage(error));
     }
+    pendingScrollRestore = null;
+    return;
+  }
+
+  const cardInvoiceForm = event.target.closest("[data-card-invoice-id]");
+  if (cardInvoiceForm) {
+    event.preventDefault();
+    const card = state.data.cards.find((item) => item.id === cardInvoiceForm.dataset.cardId);
+    if (!card) return;
+    try {
+      await dbInsert(
+        "transactions",
+        toDbTransaction(
+          transactionFromCardInvoice(card, cardInvoiceForm.dataset.cardInvoiceId, readForm(cardInvoiceForm)),
+          state.householdId,
+          state.user.id,
+        ),
+      );
+      await persist("Fatura paga.");
+    } catch (error) {
+      pendingScrollRestore = null;
+      console.error(error);
+      showToast(error.message || "Não foi possível pagar a fatura.");
+    }
     return;
   }
 
@@ -1622,9 +2703,10 @@ appRoot.addEventListener("submit", async (event) => {
     const plan = state.data.planningItems.find((item) => item.id === pendingForm.dataset.pendingId);
     if (!plan) return;
     try {
-      await insertRemote("transactions", toDbTransaction(transactionFromOccurrence(plan, readForm(pendingForm)), state.householdId, state.user.id));
+      await dbInsert("transactions", toDbTransaction(transactionFromOccurrence(plan, readForm(pendingForm)), state.householdId, state.user.id));
       await persist(plan.type === "income" ? "Receita realizada." : "Despesa paga.");
     } catch (error) {
+      pendingScrollRestore = null;
       console.error(error);
       showToast(error.message || "Não foi possível criar a movimentação.");
     }
@@ -1637,30 +2719,85 @@ appRoot.addEventListener("submit", async (event) => {
   try {
     await handleFormSubmit(form);
   } catch (error) {
+    pendingScrollRestore = null;
     console.error(error);
     showToast(error.message || "Não foi possível salvar.");
   }
 });
 
+appRoot.addEventListener(
+  "focus",
+  (event) => {
+    const input = event.target.closest?.("[data-money-input]");
+    if (input) editMoneyInput(input);
+  },
+  true,
+);
+
+appRoot.addEventListener(
+  "blur",
+  (event) => {
+    const input = event.target.closest?.("[data-money-input]");
+    if (input) formatMoneyInput(input);
+  },
+  true,
+);
+
+appRoot.addEventListener("change", (event) => {
+  const filter = event.target.closest("[data-transaction-filter]");
+  if (!filter) return;
+  const key = filter.dataset.transactionFilter;
+  const previous = state.filters.transactions || { scope: "all", accountId: "", cardId: "", categoryId: "" };
+  const next = { ...previous, [key]: filter.value };
+  if (key === "scope") {
+    next.accountId = "";
+    next.cardId = "";
+  }
+  state.filters.transactions = next;
+  render();
+});
+
 appRoot.addEventListener("click", async (event) => {
+  const monthTarget = event.target.closest("[data-month]");
+  if (monthTarget) {
+    setMonth(monthTarget.dataset.month);
+    return;
+  }
   const target = event.target.closest("[data-action]");
   if (!target) return;
   const action = target.dataset.action;
 
+  if (action === "open-quick-add") {
+    state.quickAddOpen = true;
+    state.quickAddPreset = null;
+    renderQuickAddModal();
+    return;
+  }
+
+  if (action === "open-quick-add-loan") {
+    state.quickAddOpen = true;
+    state.quickAddPreset = { entryType: "loan", loanAction: "lend" };
+    renderQuickAddModal();
+    return;
+  }
+
+  if (action === "open-loan-repayment") {
+    state.quickAddOpen = true;
+    state.quickAddPreset = {
+      entryType: "loan",
+      loanAction: "repayment",
+      personKey: target.dataset.personKey,
+      personName: target.dataset.personName,
+    };
+    renderQuickAddModal();
+    return;
+  }
+
   if (action === "edit") {
+    const scrollState = captureScrollState(target);
     state.editing[target.dataset.collection] = target.dataset.id;
     render();
-    const formTargets = {
-      transactions: "#transactionForm",
-      accounts: "#accountForm",
-      cards: "#cardForm",
-      planning_items: "#planningForm",
-      categories: "#categoryForm",
-      investments: "#investmentForm",
-      market_groups: "#marketGroupForm",
-      market_history: "#marketHistoryForm",
-    };
-    window.setTimeout(() => document.querySelector(formTargets[target.dataset.collection] || ".form-panel")?.scrollIntoView({ behavior: "smooth" }), 0);
+    restoreScrollState(scrollState);
   }
 
   if (action === "cancel-edit") {
@@ -1673,7 +2810,7 @@ appRoot.addEventListener("click", async (event) => {
     const collection = target.dataset.collection;
     const tableMap = { transactions: "transactions" };
     try {
-      await deleteRemote(tableMap[collection] || collection, target.dataset.id);
+      await dbDelete(tableMap[collection] || collection, target.dataset.id);
       await persist("Registro excluído.");
     } catch (error) {
       console.error(error);
@@ -1685,11 +2822,21 @@ appRoot.addEventListener("click", async (event) => {
     }
   }
 
+  if (action === "undo-pending") {
+    try {
+      await dbDelete("transactions", target.dataset.transactionId);
+      await persist("Pagamento desfeito.");
+    } catch (error) {
+      console.error(error);
+      showToast(error.message || "Não foi possível desfazer.");
+    }
+  }
+
   if (action === "toggle-active") {
     const item = state.data.planningItems.find((plan) => plan.id === target.dataset.id);
     if (!item) return;
     try {
-      await updateRemote("planning_items", item.id, toDbPlanning({ ...item, active: !item.active }, state.householdId, state.user.id));
+      await dbUpdate("planning_items", item.id, toDbPlanning({ ...item, active: !item.active }, state.householdId, state.user.id));
       await persist(item.active ? "Planejamento desativado." : "Planejamento ativado.");
     } catch (error) {
       console.error(error);
@@ -1703,6 +2850,10 @@ appRoot.addEventListener("click", async (event) => {
     showToast("Reset remoto não foi habilitado para evitar apagar dados por engano.");
   }
   if (action === "logout") {
+    if (LOCAL_AUTH_BYPASS) {
+      showToast("Modo local temporário ativo.");
+      return;
+    }
     await signOut();
     resetAuthenticatedState();
     setRoute("dashboard", true);
@@ -1719,6 +2870,7 @@ window.addEventListener("hashchange", () => {
 });
 
 onAuthChange(async (user) => {
+  if (LOCAL_AUTH_BYPASS) return;
   if (!state.authReady) return;
   if (user && user.id !== state.user?.id) {
     await initializeForUser(user, { redirectToDashboard: true });

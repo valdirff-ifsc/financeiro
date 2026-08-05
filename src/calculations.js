@@ -74,6 +74,29 @@ export function normalize(value) {
     .trim();
 }
 
+const FINANCE_META_PREFIX = "financeiro-meta:";
+
+export function parseFinanceMeta(notes) {
+  const line = String(notes || "")
+    .split("\n")
+    .find((item) => item.startsWith(FINANCE_META_PREFIX));
+  if (!line) return {};
+  try {
+    return JSON.parse(line.slice(FINANCE_META_PREFIX.length));
+  } catch {
+    return {};
+  }
+}
+
+export function withFinanceMeta(notes, meta) {
+  const cleanNotes = String(notes || "")
+    .split("\n")
+    .filter((line) => !line.startsWith(FINANCE_META_PREFIX))
+    .join("\n")
+    .trim();
+  return [`${FINANCE_META_PREFIX}${JSON.stringify(meta)}`, cleanNotes].filter(Boolean).join("\n");
+}
+
 export function getCategory(data, id) {
   return data.categories.find((category) => category.id === id);
 }
@@ -114,8 +137,65 @@ export function cardInstallmentAmount(transaction) {
   return toNumber(transaction.amount) / installments;
 }
 
+export function monthDistance(fromMonth, toMonth) {
+  const [fromYear, fromIndex] = String(fromMonth).split("-").map(Number);
+  const [toYear, toIndex] = String(toMonth).split("-").map(Number);
+  return (toYear - fromYear) * 12 + toIndex - fromIndex;
+}
+
+export function firstCardInvoiceMonth(card, dateValue) {
+  const purchaseMonth = String(dateValue || "").slice(0, 7) || currentMonth();
+  const purchaseDay = Math.max(1, toNumber(String(dateValue || "").slice(8, 10)) || 1);
+  const closingDay = Math.max(1, toNumber(card?.closingDay) || 1);
+  const dueDay = Math.max(1, toNumber(card?.dueDay) || 1);
+  const baseOffset = dueDay <= closingDay ? 1 : 0;
+  return addMonths(purchaseMonth, baseOffset + (purchaseDay > closingDay ? 1 : 0));
+}
+
+function cardTransactionForMonth(transaction, month) {
+  const meta = parseFinanceMeta(transaction.notes);
+  const invoiceMonth =
+    meta.invoiceMonth ||
+    String(transaction.notes || "").match(/Aba: Fatura_([0-9]{4}-[0-9]{2})-[0-9]{2}/)?.[1] ||
+    String(transaction.date || "").slice(0, 7);
+  const installments = Math.max(1, Math.trunc(toNumber(transaction.installments)) || 1);
+  const currentInstallment = Math.max(1, Math.trunc(toNumber(transaction.currentInstallment)) || 1);
+  const offset = monthDistance(invoiceMonth, month);
+  const installment = currentInstallment + offset;
+
+  if (offset < 0 || installment > installments) return null;
+
+  const day = Math.max(1, Math.trunc(toNumber(String(transaction.date || "").slice(8, 10))) || 1);
+  return {
+    ...transaction,
+    date: makeDate(month, day),
+    currentInstallment: installment,
+    isProjectedInstallment: offset > 0,
+  };
+}
+
+function planningAppliesToMonth(plan, month) {
+  const meta = parseFinanceMeta(plan.notes);
+  const startMonth = meta.startMonth || "";
+  if (!startMonth) return true;
+  const offset = monthDistance(startMonth, month);
+  if (offset < 0) return false;
+  if (meta.repeatMode === "once") return offset === 0;
+  if (meta.frequency === "yearly") return offset % 12 === 0;
+  const totalOccurrences = Math.max(0, Math.trunc(toNumber(meta.totalOccurrences)) || 0);
+  return !totalOccurrences || offset < totalOccurrences;
+}
+
 export function transactionsForMonth(data, month) {
-  return data.transactions.filter((transaction) => dateInMonth(transaction.date, month));
+  return data.transactions.flatMap((transaction) => {
+    if (transaction.type !== "card") return dateInMonth(transaction.date, month) ? [transaction] : [];
+    const installment = cardTransactionForMonth(transaction, month);
+    return installment ? [installment] : [];
+  });
+}
+
+function isCardPlanning(plan) {
+  return plan.type === "expense" && plan.paymentMethod === "Cartão crédito" && Boolean(plan.cardId);
 }
 
 function matchingTransactionForPlan(transactions, plan) {
@@ -137,6 +217,8 @@ export function planningOccurrences(data, month) {
   const monthTransactions = transactionsForMonth(data, month);
   return data.planningItems
     .filter((plan) => plan.active)
+    .filter((plan) => planningAppliesToMonth(plan, month))
+    .filter((plan) => !isCardPlanning(plan))
     .map((plan) => {
       const transaction = matchingTransactionForPlan(monthTransactions, plan);
       const actualAmount = transaction ? toNumber(transaction.amount) : 0;
@@ -255,16 +337,40 @@ function investmentSummary(data) {
   };
 }
 
+function plannedCardCharges(data, month, card, monthTransactions) {
+  return data.planningItems
+    .filter((plan) => plan.active && isCardPlanning(plan) && plan.cardId === card.id)
+    .filter((plan) => planningAppliesToMonth(plan, month))
+    .filter((plan) => !matchingTransactionForPlan(monthTransactions, plan))
+    .map((plan) => ({
+      id: `${plan.id}:${month}`,
+      planId: plan.id,
+      name: plan.name,
+      amount: toNumber(plan.amount),
+      dueDate: makeDate(month, plan.day),
+      categoryId: plan.categoryId,
+      source: "planning",
+    }));
+}
+
 function cardSummary(data, month) {
+  const monthTransactions = transactionsForMonth(data, month);
   return data.cards.map((card) => {
     const purchases = data.transactions.filter(
       (transaction) => transaction.type === "card" && transaction.cardId === card.id,
     );
-    const monthPurchases = purchases.filter((transaction) => dateInMonth(transaction.date, month));
-    const invoice = sum(monthPurchases, (transaction) => cardInstallmentAmount(transaction));
+    const monthPurchases = purchases
+      .map((transaction) => cardTransactionForMonth(transaction, month))
+      .filter(Boolean);
+    const plannedCharges = plannedCardCharges(data, month, card, monthTransactions);
+    const invoice =
+      sum(monthPurchases, (transaction) => cardInstallmentAmount(transaction)) +
+      sum(plannedCharges, (charge) => charge.amount);
     const usedLimit = sum(purchases, (transaction) => {
       const installments = Math.max(1, toNumber(transaction.installments) || 1);
-      const current = Math.max(1, toNumber(transaction.currentInstallment) || 1);
+      const invoiceMonth = parseFinanceMeta(transaction.notes).invoiceMonth || String(transaction.date || "").slice(0, 7);
+      const elapsed = Math.max(0, monthDistance(invoiceMonth, month));
+      const current = Math.max(1, toNumber(transaction.currentInstallment) + elapsed || 1);
       const remaining = Math.max(0, installments - current + 1);
       return cardInstallmentAmount(transaction) * remaining;
     });
@@ -273,12 +379,50 @@ function cardSummary(data, month) {
       ...card,
       purchases,
       monthPurchases,
+      plannedCharges,
       invoice,
       usedLimit,
       availableLimit: toNumber(card.limitTotal) - usedLimit,
       usageRate: usedLimit / Math.max(1, toNumber(card.limitTotal)),
     };
   });
+}
+
+function cardInvoiceOccurrences(data, month, cardData) {
+  const monthTransactions = transactionsForMonth(data, month);
+  return cardData
+    .filter((card) => toNumber(card.invoice) > 0)
+    .map((card) => {
+      const id = `card_invoice:${card.id}:${month}`;
+      const payment = monthTransactions.find(
+        (transaction) =>
+          transaction.type === "transfer" &&
+          transaction.cardId === card.id &&
+          transaction.paymentMethod === "Pagamento de fatura" &&
+          String(transaction.notes || "").includes(id),
+      );
+      const expectedAmount = toNumber(card.invoice);
+      const actualAmount = payment ? toNumber(payment.amount) : 0;
+      const dueDate = makeDate(month, card.dueDay || 1);
+      return {
+        id,
+        planId: "",
+        source: "card_invoice",
+        cardId: card.id,
+        accountId: card.accountId || "",
+        group: "card_invoice",
+        type: "expense",
+        name: `Fatura ${card.name}`,
+        plannedCharges: card.plannedCharges || [],
+        expectedAmount,
+        actualAmount,
+        difference: payment ? actualAmount - expectedAmount : 0,
+        dueDate,
+        transaction: payment,
+        status: payment ? "done" : "pending",
+        daysUntil: daysUntil(dueDate),
+      };
+    });
 }
 
 function accountSummary(data, month) {
@@ -312,13 +456,23 @@ function accountSummary(data, month) {
 }
 
 export function calculateFinance(data, selectedMonth) {
-  const occurrences = planningOccurrences(data, selectedMonth);
+  const cardData = cardSummary(data, selectedMonth);
+  const occurrences = [...planningOccurrences(data, selectedMonth), ...cardInvoiceOccurrences(data, selectedMonth, cardData)].sort(
+    (a, b) => a.dueDate.localeCompare(b.dueDate),
+  );
   const pendingOccurrences = occurrences.filter((occurrence) => occurrence.status === "pending");
   const doneOccurrences = occurrences.filter((occurrence) => occurrence.status === "done");
   const tx = transactionsForMonth(data, selectedMonth);
   const actualIncomeTransactions = tx.filter((transaction) => transaction.type === "income");
-  const actualExpenseTransactions = tx.filter(
+  const expenseTransactions = tx.filter(
     (transaction) => transaction.type !== "income" && transaction.type !== "transfer",
+  );
+  const isFutureMonth = selectedMonth > currentMonth();
+  const actualExpenseTransactions = expenseTransactions.filter(
+    () => !isFutureMonth,
+  );
+  const projectedInstallmentTransactions = expenseTransactions.filter(
+    (transaction) => transaction.type === "card" && isFutureMonth,
   );
 
   const plannedIncome = sum(
@@ -343,7 +497,6 @@ export function calculateFinance(data, selectedMonth) {
   );
   const accountsBalance = sum(data.accounts, (account) => account.balance);
   const investments = investmentSummary(data);
-  const cardData = cardSummary(data, selectedMonth);
   const accounts = accountSummary(data, selectedMonth);
   const market = marketForecast(data);
 
@@ -366,6 +519,52 @@ export function calculateFinance(data, selectedMonth) {
     (transaction, id) => getCategoryName(data, id),
     (transaction, id) => getCategoryColor(data, id),
   );
+
+  const actualByCategory = new Map(byCategory.map((item) => [item.id, item.value]));
+  const committedByCategory = new Map();
+  const addCommitted = (categoryId, amount) => {
+    if (!categoryId) return;
+    committedByCategory.set(categoryId, (committedByCategory.get(categoryId) || 0) + toNumber(amount));
+  };
+  projectedInstallmentTransactions.forEach((transaction) =>
+    addCommitted(transaction.categoryId, cardInstallmentAmount(transaction)),
+  );
+  pendingOccurrences
+    .filter((occurrence) => occurrence.source !== "card_invoice" && occurrence.plan?.categoryId)
+    .forEach((occurrence) => addCommitted(occurrence.plan.categoryId, occurrence.expectedAmount));
+  cardData.forEach((card) =>
+    card.plannedCharges.forEach((charge) => addCommitted(charge.categoryId, charge.amount)),
+  );
+
+  const categoryBudgets = data.categories
+    .filter((category) => category.type !== "income")
+    .map((category) => {
+      const budget = Math.max(0, toNumber(category.budget));
+      const spent = toNumber(actualByCategory.get(category.id));
+      const committed = toNumber(committedByCategory.get(category.id));
+      const used = spent + committed;
+      return {
+        ...category,
+        budget,
+        spent,
+        committed,
+        used,
+        available: budget > 0 ? Math.max(0, budget - used) : 0,
+        exceeded: budget > 0 ? Math.max(0, used - budget) : 0,
+        progress: budget > 0 ? used / budget : 0,
+      };
+    })
+    .sort((a, b) => (b.budget > 0) - (a.budget > 0) || b.used - a.used);
+  const configuredCategoryBudgets = categoryBudgets.filter((category) => category.budget > 0);
+  const categoryReserved = sum(configuredCategoryBudgets, (category) => category.available);
+  const categoryBudgetTotal = sum(configuredCategoryBudgets, (category) => category.budget);
+  const categoryUsedTotal = sum(configuredCategoryBudgets, (category) => category.used);
+  const categorySpentTotal = sum(categoryBudgets, (category) => category.spent);
+  const categoryCommittedTotal = sum(categoryBudgets, (category) => category.committed);
+  const cashAfterCommitments = Math.max(0, saldoPrevistoFinal);
+  const availableForNewSpending = configuredCategoryBudgets.length
+    ? Math.max(0, Math.min(categoryReserved, cashAfterCommitments))
+    : cashAfterCommitments;
 
   const byPaymentMethod = groupBy(
     expenseTransactionsForCharts,
@@ -427,6 +626,16 @@ export function calculateFinance(data, selectedMonth) {
     accounts,
     market,
     byCategory,
+    categoryBudgets,
+    categoryBudget: {
+      total: categoryBudgetTotal,
+      used: categoryUsedTotal,
+      spent: categorySpentTotal,
+      committed: categoryCommittedTotal,
+      reserved: categoryReserved,
+      availableForNewSpending,
+      configuredCount: configuredCategoryBudgets.length,
+    },
     byPaymentMethod,
     byAccount,
     plannedVsRealized,

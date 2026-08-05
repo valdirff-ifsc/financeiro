@@ -8,33 +8,37 @@
       name="description"
       content="Sistema pessoal de controle financeiro com dashboard, cartões, contas, despesas, mercado, dívidas, receitas e investimentos."
     />
-    <meta name="theme-color" content="#0f766e" />
+    <meta name="theme-color" content="#0b1110" />
     <meta name="application-name" content="Financeiro" />
     <meta name="apple-mobile-web-app-title" content="Financeiro" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <link rel="manifest" href="/manifest.json" />
-    <link rel="icon" type="image/png" sizes="192x192" href="/assets/icons/icon-192.png" />
-    <link rel="apple-touch-icon" href="/assets/icons/icon-192.png" />
-    <link rel="stylesheet" href="styles/main.css" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/assets/icons/icon-192.png?v=7" />
+    <link rel="apple-touch-icon" href="/assets/icons/icon-192.png?v=7" />
+    <link rel="stylesheet" href="styles/main.css?direct&amp;v=7" />
     <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js" defer></script>
   </head>
   <body>
     <div class="app-shell">
       <aside class="sidebar" id="sidebar">
         <div class="brand">
-          <div class="brand-mark">FP</div>
+          <img class="brand-mark" src="/assets/icons/icon-192.png?v=7" alt="" />
           <div>
             <strong>Financeiro</strong>
             <span>controle pessoal</span>
           </div>
+          <button class="icon-button mobile-only sidebar-close" id="sidebarClose" type="button" aria-label="Fechar menu">
+            <i data-lucide="x"></i>
+          </button>
         </div>
         <nav class="nav-list" id="sidebarNav" aria-label="Navegação principal"></nav>
       </aside>
+      <button class="sidebar-backdrop" id="sidebarBackdrop" type="button" aria-label="Fechar menu"></button>
 
       <div class="main-shell">
         <header class="topbar">
-          <button class="icon-button mobile-only" id="menuToggle" type="button" aria-label="Abrir menu">
+          <button class="icon-button mobile-only" id="menuToggle" type="button" aria-label="Abrir menu" aria-expanded="false">
             <i data-lucide="menu"></i>
           </button>
 
@@ -44,6 +48,10 @@
           </div>
 
           <div class="topbar-actions month-toolbar" aria-label="Controle do mês analisado">
+            <button class="button quick-add-trigger" id="quickAddButton" type="button">
+              <i data-lucide="plus"></i>
+              <span>Adicionar</span>
+            </button>
             <button class="icon-button month-nav" id="monthPrev" type="button" aria-label="Mês anterior">
               <i data-lucide="chevron-left"></i>
             </button>
@@ -73,8 +81,9 @@
     </div>
 
     <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+    <div id="modalRoot"></div>
 
-    <script type="module" src="src/app.js"></script>
+    <script type="module" src="src/app.js?v=7"></script>
     <script>
       if ("serviceWorker" in navigator) {
         window.addEventListener("load", () => {

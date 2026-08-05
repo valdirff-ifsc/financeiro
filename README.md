@@ -154,25 +154,29 @@ Assim a interface consegue mostrar quem criou a movimentação.
 
 ## Fluxo principal do produto
 
-O sistema separa:
+O botão universal `Adicionar` recebe compras à vista, compras parceladas, assinaturas, boletos, PIX recorrentes, receitas e dinheiro emprestado. Itens recorrentes são cadastrados uma vez e geram automaticamente as ocorrências dos meses seguintes.
 
-- Planejamento: receitas, despesas, assinaturas e mercado estimado.
-- Pendências: ocorrências mensais geradas automaticamente.
-- Movimentações: eventos reais.
+Empréstimos pessoais são agrupados por pessoa. Um novo empréstimo aumenta o saldo a receber e cada devolução parcial ou total reduz esse saldo sem ser tratada como receita ou despesa comum.
 
-Quando uma pendência é marcada como paga ou recebida, a aplicação cria uma movimentação real vinculada ao planejamento.
+O sistema separa claramente:
+
+- realizado: o que já aconteceu;
+- comprometido: parcelas e contas já assumidas;
+- reservado: margem que ainda existe nas metas por categoria;
+- disponível para novas decisões: o menor valor entre a margem das metas e o caixa previsto.
+
+Quando uma conta em `A fazer` é marcada como paga ou recebida, a aplicação cria a movimentação real vinculada ao compromisso, sem duplicar o cadastro.
 
 ## Menu
 
-- Dashboard
-- Pendências do mês
-- Movimentações
-- Contas bancárias
-- Cartões
-- Planejamento
-- Investimentos
-- Categorias
-- Configurações
+- Hoje
+- A fazer
+- Futuro
+- Histórico
+- Metas
+- Cadastros
+
+Contas, cartões, compromissos, categorias, investimentos e preferências ficam agrupados em `Cadastros`.
 
 ## Auth
 
