@@ -1,4 +1,4 @@
-const CACHE_NAME = "financeiro-pwa-v7-menu";
+const CACHE_NAME = "financeiro-pwa-v13-functional";
 
 const APP_SHELL = [
   "/",
@@ -8,10 +8,7 @@ const APP_SHELL = [
   "/assets/icons/icon-512.png",
 ];
 
-const RUNTIME_ASSETS = [
-  "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2",
-  "https://unpkg.com/lucide@latest/dist/umd/lucide.min.js",
-];
+const RUNTIME_ASSETS = [];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(

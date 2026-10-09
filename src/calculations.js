@@ -152,15 +152,18 @@ export function firstCardInvoiceMonth(card, dateValue) {
   return addMonths(purchaseMonth, baseOffset + (purchaseDay > closingDay ? 1 : 0));
 }
 
-function cardTransactionForMonth(transaction, month) {
+function cardTransactionForMonth(transaction, month, basis = "spending") {
   const meta = parseFinanceMeta(transaction.notes);
-  const invoiceMonth =
+  const purchaseMonth = meta.spendingMonth || String(transaction.date || "").slice(0, 7);
+  const statementMonth =
+    meta.statementMonth ||
     meta.invoiceMonth ||
     String(transaction.notes || "").match(/Aba: Fatura_([0-9]{4}-[0-9]{2})-[0-9]{2}/)?.[1] ||
-    String(transaction.date || "").slice(0, 7);
+    purchaseMonth;
+  const referenceMonth = basis === "statement" ? statementMonth : purchaseMonth;
   const installments = Math.max(1, Math.trunc(toNumber(transaction.installments)) || 1);
   const currentInstallment = Math.max(1, Math.trunc(toNumber(transaction.currentInstallment)) || 1);
-  const offset = monthDistance(invoiceMonth, month);
+  const offset = monthDistance(referenceMonth, month);
   const installment = currentInstallment + offset;
 
   if (offset < 0 || installment > installments) return null;
@@ -199,18 +202,7 @@ function isCardPlanning(plan) {
 }
 
 function matchingTransactionForPlan(transactions, plan) {
-  const direct = transactions.find((transaction) => transaction.linkedPlanningId === plan.id);
-  if (direct) return direct;
-
-  const planName = normalize(plan.name);
-  return transactions.find((transaction) => {
-    if (transaction.linkedPlanningId) return false;
-    if (transaction.type !== plan.type && !(transaction.type === "card" && plan.type === "expense")) return false;
-    const sameCategory = transaction.categoryId === plan.categoryId;
-    const similarText =
-      normalize(transaction.description).includes(planName) || planName.includes(normalize(transaction.description));
-    return sameCategory && similarText;
-  });
+  return transactions.find((transaction) => transaction.linkedPlanningId === plan.id);
 }
 
 export function planningOccurrences(data, month) {
@@ -338,6 +330,12 @@ function investmentSummary(data) {
 }
 
 function plannedCardCharges(data, month, card, monthTransactions) {
+  const hasImportedStatement = monthTransactions.some((transaction) => {
+    const meta = parseFinanceMeta(transaction.notes);
+    return meta.source === "c6-import" && meta.statementMonth === month;
+  });
+  if (hasImportedStatement) return [];
+
   return data.planningItems
     .filter((plan) => plan.active && isCardPlanning(plan) && plan.cardId === card.id)
     .filter((plan) => planningAppliesToMonth(plan, month))
@@ -354,21 +352,21 @@ function plannedCardCharges(data, month, card, monthTransactions) {
 }
 
 function cardSummary(data, month) {
-  const monthTransactions = transactionsForMonth(data, month);
   return data.cards.map((card) => {
     const purchases = data.transactions.filter(
       (transaction) => transaction.type === "card" && transaction.cardId === card.id,
     );
     const monthPurchases = purchases
-      .map((transaction) => cardTransactionForMonth(transaction, month))
+      .map((transaction) => cardTransactionForMonth(transaction, month, "statement"))
       .filter(Boolean);
-    const plannedCharges = plannedCardCharges(data, month, card, monthTransactions);
+    const plannedCharges = plannedCardCharges(data, month, card, monthPurchases);
     const invoice =
       sum(monthPurchases, (transaction) => cardInstallmentAmount(transaction)) +
       sum(plannedCharges, (charge) => charge.amount);
     const usedLimit = sum(purchases, (transaction) => {
       const installments = Math.max(1, toNumber(transaction.installments) || 1);
-      const invoiceMonth = parseFinanceMeta(transaction.notes).invoiceMonth || String(transaction.date || "").slice(0, 7);
+      const meta = parseFinanceMeta(transaction.notes);
+      const invoiceMonth = meta.statementMonth || meta.invoiceMonth || String(transaction.date || "").slice(0, 7);
       const elapsed = Math.max(0, monthDistance(invoiceMonth, month));
       const current = Math.max(1, toNumber(transaction.currentInstallment) + elapsed || 1);
       const remaining = Math.max(0, installments - current + 1);
@@ -455,7 +453,19 @@ function accountSummary(data, month) {
   });
 }
 
-export function calculateFinance(data, selectedMonth) {
+function cashImpact(transaction) {
+  const amount = toNumber(transaction.amount);
+  if (transaction.type === "card") return 0;
+  if (transaction.type === "income") return amount;
+  if (transaction.type === "transfer") {
+    if (transaction.fromAccountId && !transaction.toAccountId) return -amount;
+    if (transaction.toAccountId && !transaction.fromAccountId) return amount;
+    return 0;
+  }
+  return -amount;
+}
+
+export function calculateFinance(data, selectedMonth, options = {}) {
   const cardData = cardSummary(data, selectedMonth);
   const occurrences = [...planningOccurrences(data, selectedMonth), ...cardInvoiceOccurrences(data, selectedMonth, cardData)].sort(
     (a, b) => a.dueDate.localeCompare(b.dueDate),
@@ -495,7 +505,9 @@ export function calculateFinance(data, selectedMonth) {
     pendingOccurrences.filter((occurrence) => occurrence.type === "expense"),
     (occurrence) => occurrence.expectedAmount,
   );
-  const accountsBalance = sum(data.accounts, (account) => account.balance);
+  const openingAccountsBalance = sum(data.accounts, (account) => account.balance);
+  const confirmedCashFlow = sum(tx, cashImpact);
+  const accountsBalance = openingAccountsBalance + confirmedCashFlow;
   const investments = investmentSummary(data);
   const accounts = accountSummary(data, selectedMonth);
   const market = marketForecast(data);
@@ -552,6 +564,7 @@ export function calculateFinance(data, selectedMonth) {
         available: budget > 0 ? Math.max(0, budget - used) : 0,
         exceeded: budget > 0 ? Math.max(0, used - budget) : 0,
         progress: budget > 0 ? used / budget : 0,
+        warning: budget > 0 && used / budget >= Math.max(0.01, toNumber(data.settings?.highSpendingAlertRate) || 0.9),
       };
     })
     .sort((a, b) => (b.budget > 0) - (a.budget > 0) || b.used - a.used);
@@ -639,7 +652,7 @@ export function calculateFinance(data, selectedMonth) {
     byPaymentMethod,
     byAccount,
     plannedVsRealized,
-    monthlyEvolution: monthlyEvolution(data, selectedMonth),
+    monthlyEvolution: options.includeEvolution === false ? [] : monthlyEvolution(data, selectedMonth),
     todayTasks,
     upcomingSubscriptions,
     upcomingPayments,

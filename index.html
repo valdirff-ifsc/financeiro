@@ -8,22 +8,20 @@
       name="description"
       content="Sistema pessoal de controle financeiro com dashboard, cartões, contas, despesas, mercado, dívidas, receitas e investimentos."
     />
-    <meta name="theme-color" content="#0b1110" />
+    <meta name="theme-color" content="#0b1214" />
     <meta name="application-name" content="Financeiro" />
     <meta name="apple-mobile-web-app-title" content="Financeiro" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <link rel="manifest" href="/manifest.json" />
-    <link rel="icon" type="image/png" sizes="192x192" href="/assets/icons/icon-192.png?v=7" />
-    <link rel="apple-touch-icon" href="/assets/icons/icon-192.png?v=7" />
-    <link rel="stylesheet" href="styles/main.css?direct&amp;v=7" />
-    <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js" defer></script>
+    <link rel="icon" type="image/png" sizes="192x192" href="/assets/icons/icon-192.png?v=12" />
+    <link rel="apple-touch-icon" href="/assets/icons/icon-192.png?v=12" />
   </head>
   <body>
     <div class="app-shell">
       <aside class="sidebar" id="sidebar">
         <div class="brand">
-          <img class="brand-mark" src="/assets/icons/icon-192.png?v=7" alt="" />
+          <img class="brand-mark" src="/assets/icons/icon-192.png?v=12" alt="" />
           <div>
             <strong>Financeiro</strong>
             <span>controle pessoal</span>
@@ -72,7 +70,6 @@
               <i data-lucide="calendar-check"></i>
               <span>Este mês</span>
             </button>
-            <input id="importFile" type="file" accept="application/json" hidden />
           </div>
         </header>
 
@@ -82,8 +79,9 @@
 
     <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
     <div id="modalRoot"></div>
+    <dialog class="confirm-dialog" id="confirmDialog"></dialog>
 
-    <script type="module" src="src/app.js?v=7"></script>
+    <script type="module" src="src/app.js"></script>
     <script>
       if ("serviceWorker" in navigator) {
         window.addEventListener("load", () => {

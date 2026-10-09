@@ -1,5 +1,5 @@
 import { defaultData } from "./data.js";
-import { supabase } from "./supabaseClient.js";
+import { supabase, supabaseConfigured } from "./supabaseClient.js";
 
 const tableNames = [
   "categories",
@@ -40,6 +40,7 @@ function profileName(user) {
 }
 
 export async function getSessionUser() {
+  if (!supabaseConfigured) return null;
   const { data: sessionData } = await supabase.auth.getSession();
   if (!sessionData.session) return null;
 
@@ -49,14 +50,23 @@ export async function getSessionUser() {
 }
 
 export async function signIn(email, password) {
+  if (!supabaseConfigured) return { data: {}, error: new Error("Configure as variáveis do Supabase para entrar.") };
   return supabase.auth.signInWithPassword({ email, password });
 }
 
 export async function signOut() {
+  if (!supabaseConfigured) return;
   return supabase.auth.signOut();
 }
 
+export async function requestPasswordReset(email, redirectTo) {
+  if (!supabaseConfigured) throw new Error("Configure as variáveis do Supabase.");
+  const { error } = await supabase.auth.resetPasswordForEmail(email, { redirectTo });
+  if (error) throw error;
+}
+
 export function onAuthChange(callback) {
+  if (!supabaseConfigured) return { data: { subscription: { unsubscribe() {} } } };
   return supabase.auth.onAuthStateChange((_event, session) => callback(session?.user || null));
 }
 
@@ -462,6 +472,15 @@ export function toDbInvestment(item, householdId, userId) {
     institution: item.institution || "",
     liquidity: item.liquidity || "",
     notes: item.notes || "",
+    created_by: item.createdBy || userId,
+  };
+}
+
+export function toDbInvestmentHistory(item, householdId, userId) {
+  return {
+    household_id: householdId,
+    month: monthDate(item.month),
+    amount: item.amount,
     created_by: item.createdBy || userId,
   };
 }

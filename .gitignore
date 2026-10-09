@@ -4,3 +4,11 @@ dist/
 .env.*
 !.env.example
 .vercel/
+.DS_Store
+**/.DS_Store
+.serena/
+*.log
+faturas/
+*.xlsx
+*.xls
+*.csv

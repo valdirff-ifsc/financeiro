@@ -1,4 +1,13 @@
 import { defaultData } from "./data.js";
+import {
+  Activity, ArrowDownLeft, ArrowRight, ArrowRightLeft, ArrowUpRight, Banknote, CalendarCheck,
+  CalendarClock, CalendarRange, ChartNoAxesCombined, Check, ChevronLeft, ChevronRight,
+  CircleCheckBig, CreditCard, Download, Equal, HandCoins, Info, Landmark, Layers3,
+  LayoutDashboard, ListChecks, LogIn, LogOut, Menu, Minus, Pause, Pencil, Percent,
+  PiggyBank, Play, Plus, Repeat2, Save, Settings, Settings2, ShieldCheck, ShoppingBasket,
+  Sparkles, Tags, Target, Trash2, TrendingUp, Undo2, Wallet, WalletCards, X, createIcons,
+} from "lucide";
+import "../styles/main.css";
 import { exportData, loadData, saveData } from "./storage.js";
 import {
   deleteRemote,
@@ -6,6 +15,7 @@ import {
   insertRemote,
   loadRemoteData,
   onAuthChange,
+  requestPasswordReset,
   signIn,
   signOut,
   subscribeToHousehold,
@@ -13,6 +23,7 @@ import {
   toDbCard,
   toDbCategory,
   toDbInvestment,
+  toDbInvestmentHistory,
   toDbMarketGroup,
   toDbMarketHistory,
   toDbPlanning,
@@ -25,7 +36,6 @@ import {
   calculateFinance,
   cardInstallmentAmount,
   currentMonth,
-  dateInMonth,
   daysUntil,
   formatCurrency,
   formatDate,
@@ -35,6 +45,7 @@ import {
   getCategoryColor,
   getCategoryName,
   monthLabel,
+  makeDate,
   monthDistance,
   normalize,
   firstCardInvoiceMonth,
@@ -42,7 +53,7 @@ import {
   toNumber,
   withFinanceMeta,
 } from "./calculations.js";
-import { barChart, comparisonBars, donutChart, groupedBarChart, lineChart } from "./charts.js";
+import { comparisonBars, donutChart, groupedBarChart, lineChart } from "./charts.js";
 
 const appRoot = document.querySelector("#appRoot");
 const sidebar = document.querySelector("#sidebar");
@@ -54,11 +65,11 @@ const pageTitle = document.querySelector("#pageTitle");
 const pageEyebrow = document.querySelector("#pageEyebrow");
 const monthSelect = document.querySelector("#monthSelect");
 const yearInput = document.querySelector("#yearInput");
-const importFile = document.querySelector("#importFile");
 const toast = document.querySelector("#toast");
 const modalRoot = document.querySelector("#modalRoot");
+const confirmDialog = document.querySelector("#confirmDialog");
 const quickAddButton = document.querySelector("#quickAddButton");
-const LOCAL_AUTH_BYPASS = false;
+const LOCAL_AUTH_BYPASS = import.meta.env.DEV && import.meta.env.VITE_LOCAL_AUTH_BYPASS === "true";
 const localUser = {
   id: "local-user",
   email: "local@financeiro.app",
@@ -78,10 +89,15 @@ const state = {
   unsubscribeRealtime: null,
   quickAddOpen: false,
   quickAddPreset: null,
+  formDirty: false,
+  saving: false,
 };
 
 let pendingScrollRestore = null;
 let activeInitialization = null;
+let lastResumeRefresh = 0;
+let modalReturnFocus = null;
+let ignoreRealtimeUntil = 0;
 
 function setRoute(route, updateHash = true) {
   state.route = route || "dashboard";
@@ -119,7 +135,12 @@ async function initializeForUser(user, options = {}) {
     state.householdId = remote.householdId;
     if (state.unsubscribeRealtime) state.unsubscribeRealtime();
     state.unsubscribeRealtime = subscribeToHousehold(state.householdId, async () => {
+      if (Date.now() < ignoreRealtimeUntil) return;
       await reloadRemote();
+      if (state.formDirty) {
+        showToast("Dados atualizados em outro dispositivo. Seu formulário foi preservado.", "info");
+        return;
+      }
       render();
       restoreScrollState(pendingScrollRestore);
     });
@@ -172,7 +193,7 @@ const navItems = [
 ];
 
 const paymentMethods = ["PIX", "Cartão crédito", "Cartão débito", "Boleto", "Dinheiro", "Transferência", "Outro"];
-const transactionTypes = ["income", "expense", "card", "transfer", "investment"];
+const transactionTypes = ["income", "expense", "card", "transfer"];
 const planningGroups = ["income", "expense", "subscription", "market"];
 const monthNames = [
   "janeiro",
@@ -261,7 +282,14 @@ function titleCase(value) {
 }
 
 function refreshIcons() {
-  if (window.lucide?.createIcons) window.lucide.createIcons();
+  createIcons({ icons: {
+    Activity, ArrowDownLeft, ArrowRight, ArrowRightLeft, ArrowUpRight, Banknote, CalendarCheck,
+    CalendarClock, CalendarRange, ChartNoAxesCombined, Check, ChevronLeft, ChevronRight,
+    CircleCheckBig, CreditCard, Download, Equal, HandCoins, Info, Landmark, Layers3,
+    LayoutDashboard, ListChecks, LogIn, LogOut, Menu, Minus, Pause, Pencil, Percent,
+    PiggyBank, Play, Plus, Repeat2, Save, Settings, Settings2, ShieldCheck, ShoppingBasket,
+    Sparkles, Tags, Target, Trash2, TrendingUp, Undo2, Wallet, WalletCards, X,
+  } });
 }
 
 function captureScrollState(anchor) {
@@ -298,13 +326,33 @@ function restoreScrollState(snapshot) {
   }
 }
 
-function showToast(message) {
+function showToast(message, variant = "") {
+  const inferred = variant || (/não|erro|falh|inválid|maior que|atenção/i.test(String(message)) ? "error" : "success");
   toast.textContent = message;
+  toast.className = `toast is-${inferred}`;
   toast.hidden = false;
   window.clearTimeout(showToast.timer);
   showToast.timer = window.setTimeout(() => {
     toast.hidden = true;
   }, 2600);
+}
+
+function setSaving(saving) {
+  state.saving = saving;
+  document.body.classList.toggle("is-saving", saving);
+  appRoot.setAttribute("aria-busy", String(saving));
+}
+
+function confirmAction({ title, message, confirmLabel = "Confirmar", danger = false }) {
+  return new Promise((resolve) => {
+    confirmDialog.innerHTML = `<form method="dialog"><h2>${escapeHtml(title)}</h2><p>${escapeHtml(message)}</p><div class="dialog-actions"><button class="button ghost" value="cancel">Cancelar</button><button class="button ${danger ? "danger" : ""}" value="confirm">${escapeHtml(confirmLabel)}</button></div></form>`;
+    const finish = () => {
+      confirmDialog.removeEventListener("close", finish);
+      resolve(confirmDialog.returnValue === "confirm");
+    };
+    confirmDialog.addEventListener("close", finish);
+    confirmDialog.showModal();
+  });
 }
 
 function authErrorMessage(error) {
@@ -322,9 +370,27 @@ async function reloadRemote() {
   state.householdId = remote.householdId;
 }
 
+async function refreshRemoteOnResume() {
+  if (LOCAL_AUTH_BYPASS || !state.authReady || !state.user || document.visibilityState === "hidden") return;
+  if (state.formDirty) return;
+  const now = Date.now();
+  if (now - lastResumeRefresh < 1500) return;
+  lastResumeRefresh = now;
+  try {
+    await reloadRemote();
+    render();
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+window.addEventListener("focus", refreshRemoteOnResume);
+document.addEventListener("visibilitychange", refreshRemoteOnResume);
+
 async function persist(message) {
   const scrollState = pendingScrollRestore || captureScrollState();
   if (LOCAL_AUTH_BYPASS) {
+    state.formDirty = false;
     saveData(state.data);
     render();
     restoreScrollState(scrollState);
@@ -332,16 +398,19 @@ async function persist(message) {
       if (pendingScrollRestore === scrollState) pendingScrollRestore = null;
     }, 900);
     showToast(message);
+    setSaving(false);
     return;
   }
 
   await reloadRemote();
+  state.formDirty = false;
   render();
   restoreScrollState(scrollState);
   window.setTimeout(() => {
     if (pendingScrollRestore === scrollState) pendingScrollRestore = null;
   }, 900);
   showToast(message);
+  setSaving(false);
 }
 
 const tableCollections = {
@@ -462,7 +531,10 @@ function localFromDb(table, row) {
 }
 
 async function dbInsert(table, payload) {
-  if (!LOCAL_AUTH_BYPASS) return insertRemote(table, payload);
+  if (!LOCAL_AUTH_BYPASS) {
+    ignoreRealtimeUntil = Date.now() + 1800;
+    return insertRemote(table, payload);
+  }
   const collection = tableCollections[table];
   if (!collection) return null;
   const item = localFromDb(table, { id: uid(table), ...payload });
@@ -471,7 +543,10 @@ async function dbInsert(table, payload) {
 }
 
 async function dbUpdate(table, id, payload, idColumn = "id") {
-  if (!LOCAL_AUTH_BYPASS) return updateRemote(table, id, payload, idColumn);
+  if (!LOCAL_AUTH_BYPASS) {
+    ignoreRealtimeUntil = Date.now() + 1800;
+    return updateRemote(table, id, payload, idColumn);
+  }
   if (table === "household_settings") {
     state.data.settings = {
       ...state.data.settings,
@@ -490,7 +565,10 @@ async function dbUpdate(table, id, payload, idColumn = "id") {
 }
 
 async function dbDelete(table, id) {
-  if (!LOCAL_AUTH_BYPASS) return deleteRemote(table, id);
+  if (!LOCAL_AUTH_BYPASS) {
+    ignoreRealtimeUntil = Date.now() + 1800;
+    return deleteRemote(table, id);
+  }
   const collection = tableCollections[table];
   if (!collection) return null;
   state.data[collection] = state.data[collection].filter((item) => item.id !== id);
@@ -590,12 +668,13 @@ function routeMeta(route) {
     investments: ["Investimentos", "Patrimônio investido"],
     categories: ["Categorias", "Classificação e orçamentos"],
     settings: ["Configurações", "Preferências do assistente"],
+    market: ["Mercado", "Previsão e histórico de compras"],
   };
   return map[route] || map.dashboard;
 }
 
 function renderNav() {
-  const registrationRoutes = ["accounts", "cards", "planning", "categories", "investments", "settings"];
+  const registrationRoutes = ["accounts", "cards", "planning", "categories", "investments", "market", "settings"];
   const routeButtons = navItems
     .map(
       (item) => `
@@ -684,10 +763,11 @@ function render() {
     investments: renderInvestments,
     categories: renderCategories,
     settings: renderSettings,
+    market: () => marketPlanning(calculateFinance(state.data, state.month)),
   };
   appRoot.innerHTML = (routes[state.route] || renderDashboard)();
   formatMoneyInputs();
-  renderQuickAddModal();
+  if (!state.quickAddOpen || !modalRoot.querySelector('[data-form="universal-entry"]')) renderQuickAddModal();
   refreshIcons();
 }
 
@@ -696,7 +776,7 @@ function renderAuth() {
     <section class="auth-shell">
       <article class="auth-card">
         <div class="brand auth-brand">
-          <img class="brand-mark" src="/assets/icons/icon-192.png?v=7" alt="" />
+          <img class="brand-mark" src="/assets/icons/icon-192.png?v=12" alt="" />
           <div>
             <strong>Financeiro</strong>
             <span>assistente familiar</span>
@@ -714,6 +794,7 @@ function renderAuth() {
             <input name="password" type="password" autocomplete="current-password" required />
           </label>
           <button class="button" type="submit"><i data-lucide="log-in"></i><span>Entrar</span></button>
+          <button class="action-link" type="button" data-action="forgot-password">Esqueci minha senha</button>
         </form>
       </article>
     </section>
@@ -729,8 +810,12 @@ function renderQuickAddModal() {
   if (!state.user || !state.quickAddOpen) {
     modalRoot.innerHTML = "";
     document.body.classList.remove("modal-open");
+    const returnTarget = modalReturnFocus;
+    modalReturnFocus = null;
+    window.setTimeout(() => returnTarget?.isConnected && returnTarget.focus(), 0);
     return;
   }
+  if (!modalRoot.querySelector('[role="dialog"]')) modalReturnFocus = document.activeElement;
   const defaultDate = state.month === currentMonth() ? localToday() : `${state.month}-01`;
   const preset = state.quickAddPreset || {};
   const openLoans = loanSummary().borrowers;
@@ -758,7 +843,7 @@ function renderQuickAddModal() {
           <label class="form-group"><span class="form-label">Valor</span><input name="amount" ${moneyInputAttributes()} placeholder="R$ 0,00" required /></label>
           <label class="form-group"><span class="form-label" data-universal-date-label>Data da compra ou vencimento</span><input name="date" type="date" value="${defaultDate}" required /></label>
           <label class="form-group" data-universal-field="category"><span class="form-label">Categoria</span><select name="categoryId" required><option value="">Selecione</option>${categoryOptions()}</select></label>
-          <label class="form-group" data-universal-field="payment"><span class="form-label">Como será pago?</span><select name="paymentMethod">${options(paymentMethods, "Cartão crédito")}</select></label>
+          <label class="form-group" data-universal-field="payment"><span class="form-label">Como será pago?</span><select name="paymentMethod">${options(paymentMethods, state.data.cards.length ? "Cartão crédito" : "PIX")}</select></label>
           <label class="form-group is-hidden" data-universal-field="loan-due"><span class="form-label">Previsão de devolução <small>(opcional)</small></span><input name="loanDueDate" type="date" /></label>
           <label class="form-group" data-universal-field="card"><span class="form-label">Cartão</span><select name="cardId"><option value="">Selecione</option>${cardOptions()}</select>${!state.data.cards.length ? `<small class="field-help">Cadastre um cartão antes de salvar.</small>` : ""}</label>
           <label class="form-group" data-universal-field="account"><span class="form-label">Conta</span><select name="accountId">${accountOptions(state.data.settings.mainAccountId, true)}</select></label>
@@ -916,7 +1001,7 @@ async function saveUniversalEntry(form, keepOpen = false) {
   } else {
     const installments = repeatMode === "installments" ? Math.max(2, Math.trunc(toNumber(raw.installments)) || 2) : 1;
     const notes = usesCard
-      ? withFinanceMeta(raw.notes, { source: "universal", invoiceMonth: firstCardInvoiceMonth(card, raw.date) })
+      ? cardPurchaseNotes(card, raw.date, raw.notes, "universal")
       : raw.notes?.trim() || "";
     await dbInsert("transactions", toDbTransaction({
       type: entryType === "income" ? "income" : usesCard ? "card" : "expense",
@@ -1021,7 +1106,7 @@ function categoryBudgetCard(category) {
   const width = Math.min(100, category.progress * 100);
   const status = category.exceeded > 0 ? `Excedeu ${formatCurrency(category.exceeded)}` : `${formatCurrency(category.available)} livres`;
   return `
-    <article class="budget-card ${category.exceeded > 0 ? "is-over" : ""}">
+    <article class="budget-card ${category.exceeded > 0 ? "is-over" : category.warning ? "is-warning" : ""}">
       <div class="budget-title"><span class="legend-dot" style="background:${escapeHtml(category.color)}"></span><strong>${escapeHtml(category.name)}</strong><span>${formatPercent(category.progress)}</span></div>
       <div class="progress-track"><div class="progress-fill ${category.exceeded > 0 ? "is-over" : ""}" style="width:${width}%;background:${escapeHtml(category.color)}"></div></div>
       <div class="budget-values"><span><small>Gasto</small>${formatCurrency(category.spent)}</span><span><small>Comprometido</small>${formatCurrency(category.committed)}</span><strong>${status}</strong></div>
@@ -1037,7 +1122,7 @@ function dashboardTask(item) {
         <strong>${escapeHtml(item.name)}</strong>
         <span>${escapeHtml(dueText(item))} · ${formatCurrency(item.expectedAmount)}</span>
       </div>
-      <span class="task-action ${variant}">${item.type === "income" ? "Receber" : "Pagar"}</span>
+      <button class="task-action ${variant}" type="button" data-action="go-pending">${item.type === "income" ? "Receber" : "Pagar"}</button>
     </article>
   `;
 }
@@ -1064,8 +1149,8 @@ function renderPending() {
         </div>
       </div>
       <section class="pending-columns">
-        ${pendingColumn("Receitas previstas", incomes, "Recebido")}
-        ${pendingColumn("Despesas previstas", expenses, "Pago")}
+        ${pendingColumn("Receitas previstas", incomes, "A RECEBER", "RECEBIDO")}
+        ${pendingColumn("Despesas previstas", expenses, "A PAGAR", "PAGO")}
       </section>
     </section>
   `;
@@ -1074,7 +1159,7 @@ function renderPending() {
 function renderFuture() {
   let rollingBalance = calculateFinance(state.data, state.month).saldoPrevistoFinal;
   const months = Array.from({ length: 6 }, (_, index) => addMonths(state.month, index + 1)).map((month) => {
-    const finance = calculateFinance(state.data, month);
+    const finance = calculateFinance(state.data, month, { includeEvolution: false });
     const reserve = finance.categoryBudget.reserved;
     const commitments = finance.plannedExpense;
     const opening = rollingBalance;
@@ -1136,7 +1221,7 @@ function renderFuture() {
 function renderHistory() {
   const selected = calculateFinance(state.data, state.month);
   const months = Array.from({ length: 12 }, (_, index) => addMonths(state.month, index - 11)).map((month) => {
-    const finance = calculateFinance(state.data, month);
+    const finance = calculateFinance(state.data, month, { includeEvolution: false });
     return { month, income: finance.actualIncome, expense: finance.actualExpense, balance: finance.actualIncome - finance.actualExpense, count: finance.transactions.length };
   }).reverse();
 
@@ -1170,6 +1255,7 @@ function renderRegistrations() {
       ${registrationCard("repeat-2", "Compromissos", `${activeCommitments} ativo(s)`, "Assinaturas, boletos e PIX recorrentes", "planning")}
       ${registrationCard("tags", "Categorias", `${state.data.categories.length} cadastrada(s)`, "Organização dos gastos e receitas", "categories")}
       ${registrationCard("piggy-bank", "Investimentos", `${state.data.investments.length} cadastrado(s)`, "Patrimônio separado do orçamento", "investments")}
+      ${registrationCard("shopping-basket", "Mercado", `${state.data.marketHistory.length} mês(es) no histórico`, "Previsão e grupos de compra", "market")}
       ${registrationCard("settings", "Preferências", "Família e backup", "Conta principal e parâmetros", "settings")}
     </section>
   `;
@@ -1179,7 +1265,7 @@ function registrationCard(icon, title, value, description, route) {
   return `<a class="registration-card" href="#/${route}"><span class="registration-icon"><i data-lucide="${icon}"></i></span><div><h3>${escapeHtml(title)}</h3><strong>${escapeHtml(value)}</strong><p>${escapeHtml(description)}</p></div><i data-lucide="chevron-right"></i></a>`;
 }
 
-function pendingColumn(title, items, doneLabel) {
+function pendingColumn(title, items, pendingLabel, doneLabel) {
   return `
     <section class="panel">
       <div class="panel-header">
@@ -1189,13 +1275,13 @@ function pendingColumn(title, items, doneLabel) {
         </div>
       </div>
       <div class="pending-list">
-        ${items.map((item) => pendingItem(item, doneLabel)).join("")}
+${items.map((item) => pendingItem(item, pendingLabel, doneLabel)).join("")}
       </div>
     </section>
   `;
 }
 
-function pendingItem(item, doneLabel) {
+function pendingItem(item, pendingLabel, doneLabel) {
   const isDone = item.status === "done";
   const details = item.source === "card_invoice" && item.plannedCharges?.length
     ? `Inclui ${item.plannedCharges.length} recorrência(s) planejada(s) no cartão`
@@ -1210,7 +1296,7 @@ function pendingItem(item, doneLabel) {
   return `
     <article class="pending-item is-${item.type} ${isDone ? "is-done" : ""}">
       <div class="pending-main">
-        <span class="pending-check ${isDone ? "is-checked" : ""}" aria-hidden="true"></span>
+        <button class="pending-check ${isDone ? "is-checked" : ""}" type="button" ${isDone ? "disabled" : `data-action="focus-pending" data-pending-form="pending-${escapeHtml(item.id)}"`} aria-label="${isDone ? escapeHtml(doneLabel) : escapeHtml(pendingLabel)}"></button>
         <div>
           <strong>${escapeHtml(item.name)}</strong>
           <span>${formatDate(item.dueDate)} · previsto ${formatCurrency(item.expectedAmount)}</span>
@@ -1225,18 +1311,21 @@ function pendingItem(item, doneLabel) {
         isDone
           ? `
             <div class="pending-done-actions">
-              ${badge(doneLabel, "success")}
+              <span class="pending-complete-status" role="status" aria-label="${escapeHtml(doneLabel)}">
+                <i data-lucide="circle-check-big"></i>
+                <span>${escapeHtml(doneLabel)}</span>
+              </span>
               ${undoButton}
             </div>
           `
           : `
-            <form class="quick-realization" ${formAttribute}>
+            <form class="quick-realization" id="pending-${escapeHtml(item.id)}" ${formAttribute}>
               <input name="amount" ${moneyInputAttributes()} value="${escapeHtml(item.expectedAmount)}" aria-label="Valor real" />
               <input name="date" type="date" value="${escapeHtml(item.dueDate)}" aria-label="Data real" />
               <input name="notes" type="text" placeholder="Observações" aria-label="Observações" />
               <button class="button small quick-realization-button" type="submit">
                 <i data-lucide="check"></i>
-                <span>${escapeHtml(doneLabel)}</span>
+                <span>${escapeHtml(pendingLabel)}</span>
               </button>
             </form>
           `
@@ -1274,7 +1363,7 @@ function renderTransactions() {
           </div>
         </div>
         ${transactionFilters(filters)}
-        ${transactionsTable(records)}
+        <div data-transaction-results>${transactionsTable(records)}</div>
       </section>
       </section>
     </section>
@@ -1325,6 +1414,14 @@ function transactionForm(record = {}) {
       <label class="form-group">
         <span class="form-label">Conta bancária</span>
         <select name="accountId">${accountOptions(record?.accountId || state.data.settings.mainAccountId)}</select>
+      </label>
+      <label class="form-group ${type === "transfer" ? "" : "is-hidden"}" data-transaction-field="transfer">
+        <span class="form-label">Conta de origem</span>
+        <select name="fromAccountId">${accountOptions(record?.fromAccountId || record?.accountId || state.data.settings.mainAccountId, true)}</select>
+      </label>
+      <label class="form-group ${type === "transfer" ? "" : "is-hidden"}" data-transaction-field="transfer">
+        <span class="form-label">Conta de destino</span>
+        <select name="toAccountId">${accountOptions(record?.toAccountId || "", true)}</select>
       </label>
       <label class="form-group">
         <span class="form-label">Forma de pagamento</span>
@@ -1393,19 +1490,13 @@ function monthlyTransactionRecords(finance) {
   return [...finance.transactions, ...plannedCardTransactionRows(finance.cardData)];
 }
 
-function spendingByCategoryForRecords(records) {
-  return records
-    .filter((record) => record.type !== "income" && record.type !== "transfer")
-    .reduce((totals, record) => {
-      const amount = record.type === "card" ? cardInstallmentAmount(record) : toNumber(record.amount);
-      totals.set(record.categoryId, (totals.get(record.categoryId) || 0) + amount);
-      return totals;
-    }, new Map());
-}
-
 function transactionFilters(filters) {
   return `
     <div class="transaction-filters">
+      <label class="filter-control search-field">
+        <span class="filter-label">Buscar</span>
+        <input type="search" data-transaction-search value="${escapeHtml(state.query)}" placeholder="Descrição, categoria, conta..." />
+      </label>
       <label class="filter-control">
         <span class="filter-label">Visualizar</span>
         <select data-transaction-filter="scope">
@@ -1577,7 +1668,7 @@ function renderAccounts() {
                     </div>
                     ${account.isPrimary ? badge("Principal", "success") : badge("Secundária")}
                   </div>
-                  <div class="account-balance">${formatCurrency(account.balance)}</div>
+                  <div class="account-balance">${formatCurrency(account.projectedBalance)}</div>
                   <div class="account-flow">
                     <span>Entradas <b>${formatCurrency(account.income)}</b></span>
                     <span>Saídas <b>${formatCurrency(account.expense)}</b></span>
@@ -1595,7 +1686,7 @@ function renderAccounts() {
         }
       </section>
       <section class="form-panel" id="accountForm">
-        <div class="panel-header"><div><h2 class="panel-title">${editing ? "Editar conta" : "Nova conta"}</h2><p class="panel-subtitle">Use para atualizar saldo, observações ou criar novas contas.</p></div></div>
+        <div class="panel-header"><div><h2 class="panel-title">${editing ? "Editar conta" : "Nova conta"}</h2><p class="panel-subtitle">Informe o saldo no início do mês; as movimentações confirmadas atualizam o valor automaticamente.</p></div></div>
         ${accountForm(editing || {})}
       </section>
     </section>
@@ -1608,7 +1699,7 @@ function accountForm(record = {}) {
       <label class="form-group wide"><span class="form-label">Nome</span><input name="name" value="${escapeHtml(record.name || "")}" required /></label>
       <label class="form-group"><span class="form-label">Instituição</span><input name="institution" value="${escapeHtml(record.institution || "")}" /></label>
       <label class="form-group"><span class="form-label">Tipo</span><input name="type" value="${escapeHtml(record.type || "Conta secundária")}" /></label>
-      <label class="form-group"><span class="form-label">Saldo atual</span><input name="balance" ${moneyInputAttributes()} value="${escapeHtml(record.balance || "")}" required /></label>
+      <label class="form-group"><span class="form-label">Saldo inicial do mês</span><input name="balance" ${moneyInputAttributes()} value="${escapeHtml(record.balance || "")}" required /></label>
       <label class="form-group"><span class="form-label">Principal</span><span class="checkbox-row"><input name="isPrimary" type="checkbox" ${record.isPrimary ? "checked" : ""} /><span>Sim</span></span></label>
       <label class="form-group full"><span class="form-label">Observações</span><textarea name="notes">${escapeHtml(visibleNotes(record.notes))}</textarea></label>
       <div class="form-actions">
@@ -1818,35 +1909,6 @@ function commitmentDetail(item) {
   return `desde ${monthLabel(meta.startMonth)} · ${duration}`;
 }
 
-function planningGroup(title, group) {
-  const items = state.data.planningItems.filter((item) => item.group === group);
-  return `
-    <section class="panel">
-      <div class="panel-header"><div><h2 class="panel-title">${escapeHtml(title)}</h2><p class="panel-subtitle">${items.length} item(ns) recorrentes</p></div></div>
-      <div class="split-list">
-        ${
-          items
-            .map(
-              (item) => `
-                <div class="split-row">
-                  <span><strong>${escapeHtml(item.name)}</strong><span>Dia ${item.day} · ${escapeHtml(item.paymentMethod)} · ${escapeHtml(getCategoryName(state.data, item.categoryId))}</span></span>
-                  <span class="row-actions">
-                    ${badge(item.active ? "Ativo" : "Inativo", item.active ? "success" : "neutral")}
-                    <strong>${formatCurrency(item.amount)}</strong>
-                    <button class="action-link" type="button" data-action="edit" data-collection="planning_items" data-id="${item.id}"><i data-lucide="pencil"></i><span>Editar</span></button>
-                    <button class="action-link" type="button" data-action="toggle-active" data-id="${item.id}"><i data-lucide="${item.active ? "pause" : "play"}"></i><span>${item.active ? "Desativar" : "Ativar"}</span></button>
-                    <button class="action-link" type="button" data-action="delete" data-collection="planning_items" data-id="${item.id}"><i data-lucide="trash-2"></i><span>Excluir</span></button>
-                  </span>
-                </div>
-              `,
-            )
-            .join("") || `<div class="empty-state compact">Nenhum item cadastrado.</div>`
-        }
-      </div>
-    </section>
-  `;
-}
-
 function marketPlanning(finance) {
   const editingGroup = state.editing.market_groups
     ? state.data.marketGroups.find((group) => group.id === state.editing.market_groups)
@@ -1951,6 +2013,9 @@ function planningForm(record = {}) {
 function renderInvestments() {
   const finance = calculateFinance(state.data, state.month);
   const editing = state.editing.investments ? state.data.investments.find((item) => item.id === state.editing.investments) : null;
+  const editingHistory = state.editing.investment_history
+    ? state.data.investmentHistory.find((item) => item.id === state.editing.investment_history)
+    : null;
   return `
     <section class="module-page">
       <section class="metric-grid">
@@ -1990,6 +2055,20 @@ function renderInvestments() {
       <section class="form-panel" id="investmentForm">
         <div class="panel-header"><div><h2 class="panel-title">${editing ? "Editar investimento" : "Novo investimento"}</h2><p class="panel-subtitle">Cadastre aplicações reais e acompanhe o patrimônio.</p></div></div>
         ${investmentForm(editing || {})}
+      </section>
+      <section class="form-panel" id="investmentHistoryForm">
+        <div class="panel-header"><div><h2 class="panel-title">Evolução do patrimônio</h2><p class="panel-subtitle">Registre o total investido no fechamento de cada mês para alimentar o gráfico.</p></div></div>
+        <form class="record-form" data-form="investment-history">
+          <label class="form-group"><span class="form-label">Mês</span><input name="month" type="month" value="${escapeHtml(editingHistory?.month || state.month)}" required /></label>
+          <label class="form-group"><span class="form-label">Total investido</span><input name="amount" ${moneyInputAttributes()} value="${escapeHtml(editingHistory?.amount || finance.investments.total || "")}" required /></label>
+          <div class="form-actions">
+            ${editingHistory ? `<button class="button ghost" type="button" data-action="cancel-edit" data-collection="investment_history"><i data-lucide="x"></i><span>Cancelar</span></button>` : ""}
+            <button class="button" type="submit"><i data-lucide="save"></i><span>${editingHistory ? "Atualizar mês" : "Registrar mês"}</span></button>
+          </div>
+        </form>
+        <div class="split-list">
+          ${[...state.data.investmentHistory].sort((a, b) => b.month.localeCompare(a.month)).map((entry) => `<div class="split-row"><span><strong>${escapeHtml(monthLabel(entry.month))}</strong><span>${formatCurrency(entry.amount)}</span></span><span class="row-actions"><button class="action-link" type="button" data-action="edit" data-collection="investment_history" data-id="${entry.id}"><i data-lucide="pencil"></i><span>Editar</span></button><button class="action-link" type="button" data-action="delete" data-collection="investment_history" data-id="${entry.id}"><i data-lucide="trash-2"></i><span>Excluir</span></button></span></div>`).join("") || `<div class="empty-state compact">Nenhum fechamento mensal registrado.</div>`}
+        </div>
       </section>
     </section>
   `;
@@ -2097,11 +2176,7 @@ function goalRow(category) {
         </div>
       </div>
 
-      <details class="goal-settings">
-        <summary>
-          <i data-lucide="settings-2"></i>
-          <span>Ajustar meta</span>
-        </summary>
+      <div class="goal-settings">
         <form class="goal-form" data-form="goal" data-category-id="${escapeHtml(category.id)}">
           <label class="form-group">
             <span class="form-label">Meta mensal</span>
@@ -2112,7 +2187,7 @@ function goalRow(category) {
             <span>Salvar</span>
           </button>
         </form>
-      </details>
+      </div>
     </article>
   `;
 }
@@ -2131,7 +2206,7 @@ function renderCategories() {
                   <strong>${escapeHtml(category.name)}</strong>
                   <span>${escapeHtml(titleCase(category.type))} · orçamento ${formatCurrency(category.budget)}</span>
                 </div>
-                <button class="action-link category-delete" type="button" data-action="edit" data-collection="categories" data-id="${category.id}" aria-label="Editar categoria ${escapeHtml(category.name)}">
+                <button class="action-link category-edit" type="button" data-action="edit" data-collection="categories" data-id="${category.id}" aria-label="Editar categoria ${escapeHtml(category.name)}">
                   <i data-lucide="pencil"></i>
                 </button>
                 <button class="action-link category-delete" type="button" data-action="delete" data-collection="categories" data-id="${category.id}" aria-label="Excluir categoria ${escapeHtml(category.name)}">
@@ -2140,7 +2215,7 @@ function renderCategories() {
               </article>
             `,
           )
-          .join("")}
+          .join("") || `<div class="empty-state">Nenhuma categoria cadastrada.</div>`}
       </section>
       <section class="form-panel" id="categoryForm">
         <div class="panel-header"><div><h2 class="panel-title">${editing ? "Editar categoria" : "Nova categoria"}</h2><p class="panel-subtitle">Use categorias para orçamento e previsões automáticas.</p></div></div>
@@ -2194,7 +2269,7 @@ function renderSettings() {
         <div class="panel-header"><div><h2 class="panel-title">Preferências do assistente</h2><p class="panel-subtitle">Ajustes usados nas previsões e alertas.</p></div></div>
         <form class="record-form" data-form="settings">
           <label class="form-group"><span class="form-label">Conta principal</span><select name="mainAccountId">${accountOptions(state.data.settings.mainAccountId)}</select></label>
-          <label class="form-group"><span class="form-label">Alerta de orçamento (%)</span><input name="highSpendingAlertRate" type="number" step="0.01" value="${escapeHtml(state.data.settings.highSpendingAlertRate)}" /></label>
+          <label class="form-group"><span class="form-label">Avisar quando a categoria atingir (%)</span><input name="highSpendingAlertRate" type="number" min="1" max="100" step="1" value="${escapeHtml(Math.round(toNumber(state.data.settings.highSpendingAlertRate) * 100))}" /></label>
           <label class="form-group"><span class="form-label">Mercado padrão</span><input name="defaultMarketForecast" ${moneyInputAttributes()} value="${escapeHtml(state.data.settings.defaultMarketForecast)}" /></label>
           <label class="form-group"><span class="form-label">Meses para média</span><input name="forecastMonths" type="number" min="1" value="${escapeHtml(state.data.settings.forecastMonths)}" /></label>
           <div class="form-actions"><button class="button" type="submit"><i data-lucide="save"></i><span>Salvar configurações</span></button></div>
@@ -2204,8 +2279,6 @@ function renderSettings() {
         <div class="panel-header"><div><h2 class="panel-title">Backup</h2><p class="panel-subtitle">Os dados principais agora ficam no Supabase. O JSON serve como cópia manual.</p></div></div>
         <div class="backup-actions">
           <button class="button secondary" type="button" data-action="export"><i data-lucide="download"></i><span>Exportar JSON</span></button>
-          <button class="button secondary" type="button" data-action="import"><i data-lucide="upload"></i><span>Importar JSON</span></button>
-          <button class="button danger" type="button" data-action="reset"><i data-lucide="refresh-cw"></i><span>Resetar dados</span></button>
         </div>
       </section>
     </section>
@@ -2256,27 +2329,48 @@ function formatMoneyInputs(root = appRoot) {
   root.querySelectorAll("[data-money-input]").forEach(formatMoneyInput);
 }
 
+function cardPurchaseNotes(card, date, notes = "", source = "transaction", previousNotes = "") {
+  const spendingMonth = String(date || "").slice(0, 7) || state.month;
+  const statementMonth = firstCardInvoiceMonth(card, date);
+  const previousMeta = parseFinanceMeta(previousNotes);
+  return withFinanceMeta(notes, {
+    ...previousMeta,
+    source,
+    spendingMonth,
+    statementMonth,
+    invoiceMonth: statementMonth,
+    dueDate: makeDate(statementMonth, card?.dueDay || 1),
+  });
+}
+
 function normalizeTransaction(raw, previous = {}) {
   const paymentMethod = raw.paymentMethod || "PIX";
   let type = raw.type || previous.type || "expense";
   if (paymentMethod === "Cartão crédito" && type === "expense") type = "card";
   if (type === "card" && !raw.cardId) raw.cardId = state.data.cards[0]?.id || "";
+  const card = state.data.cards.find((item) => item.id === raw.cardId);
+  if (type === "card" && !card) throw new Error("Selecione um cartão para a compra no crédito.");
+  const date = raw.date || `${state.month}-01`;
+  if (type === "transfer" && (!raw.fromAccountId || !raw.toAccountId)) throw new Error("Selecione as contas de origem e destino.");
+  if (type === "transfer" && raw.fromAccountId === raw.toAccountId) throw new Error("A conta de destino deve ser diferente da origem.");
   return {
     ...previous,
     type,
     description: raw.description?.trim() || "Movimentação",
     amount: toNumber(raw.amount),
-    date: raw.date || `${state.month}-01`,
+    date,
     categoryId: raw.categoryId,
     accountId: raw.accountId,
+    fromAccountId: raw.fromAccountId || (type === "transfer" ? raw.accountId : ""),
+    toAccountId: raw.toAccountId || "",
     paymentMethod,
     cardId: raw.cardId || "",
     linkedPlanningId: raw.linkedPlanningId || "",
     installments: Math.max(1, toNumber(raw.installments) || 1),
     currentInstallment: Math.max(1, toNumber(raw.currentInstallment) || 1),
     status: "confirmed",
-    notes: Object.keys(parseFinanceMeta(previous.notes)).length
-      ? withFinanceMeta(raw.notes, parseFinanceMeta(previous.notes))
+    notes: type === "card"
+      ? cardPurchaseNotes(card, date, raw.notes, "transaction-form", previous.notes)
       : raw.notes?.trim() || "",
   };
 }
@@ -2375,7 +2469,7 @@ async function handleFormSubmit(form) {
       installments: Math.max(1, toNumber(raw.installments) || 1),
       currentInstallment: 1,
       status: "confirmed",
-      notes: withFinanceMeta(raw.notes, { source: "card-form", invoiceMonth: firstCardInvoiceMonth(card, raw.date) }),
+      notes: cardPurchaseNotes(card, raw.date, raw.notes, "card-form"),
     }, householdId, userId));
     await persist("Compra adicionada ao cartão.");
   }
@@ -2502,6 +2596,24 @@ async function handleFormSubmit(form) {
     }
   }
 
+  if (kind === "investment-history") {
+    const editingId = state.editing.investment_history;
+    const previous = editingId ? state.data.investmentHistory.find((item) => item.id === editingId) : {};
+    const payload = toDbInvestmentHistory({
+      ...previous,
+      month: raw.month,
+      amount: toNumber(raw.amount),
+    }, householdId, userId);
+    if (editingId) {
+      await dbUpdate("investment_history", editingId, payload);
+      state.editing.investment_history = "";
+      await persist("Histórico de investimento atualizado.");
+    } else {
+      await dbInsert("investment_history", payload);
+      await persist("Fechamento de investimento registrado.");
+    }
+  }
+
   if (kind === "market-group") {
     const editingId = state.editing.market_groups;
     const previous = editingId ? state.data.marketGroups.find((item) => item.id === editingId) : {};
@@ -2542,7 +2654,7 @@ async function handleFormSubmit(form) {
   if (kind === "settings") {
     const settings = {
       mainAccountId: raw.mainAccountId,
-      highSpendingAlertRate: toNumber(raw.highSpendingAlertRate),
+      highSpendingAlertRate: Math.max(0.01, Math.min(1, toNumber(raw.highSpendingAlertRate) / 100)),
       defaultMarketForecast: toNumber(raw.defaultMarketForecast),
       forecastMonths: Math.max(1, toNumber(raw.forecastMonths)),
     };
@@ -2623,6 +2735,7 @@ modalRoot.addEventListener("submit", async (event) => {
   const form = event.target.closest('[data-form="universal-entry"]');
   if (!form) return;
   event.preventDefault();
+  setSaving(true);
   const submitter = event.submitter;
   form.querySelectorAll("button").forEach((button) => { button.disabled = true; });
   try {
@@ -2630,6 +2743,7 @@ modalRoot.addEventListener("submit", async (event) => {
   } catch (error) {
     console.error(error);
     showToast(error.message || "Não foi possível salvar.");
+    setSaving(false);
     form.querySelectorAll("button").forEach((button) => { button.disabled = false; });
   }
 });
@@ -2645,6 +2759,16 @@ modalRoot.addEventListener("blur", (event) => {
 }, true);
 
 document.addEventListener("keydown", (event) => {
+  if (state.quickAddOpen && event.key === "Tab") {
+    const focusable = [...modalRoot.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href]')]
+      .filter((element) => !element.closest(".is-hidden"));
+    if (focusable.length) {
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    }
+  }
   if (event.key !== "Escape") return;
   if (state.quickAddOpen) {
     state.quickAddOpen = false;
@@ -2659,6 +2783,9 @@ appRoot.addEventListener("submit", async (event) => {
   const authForm = event.target.closest('[data-form="auth-login"]');
   if (authForm) {
     event.preventDefault();
+    const loginButton = authForm.querySelector('button[type="submit"]');
+    if (loginButton) loginButton.disabled = true;
+    setSaving(true);
     const raw = readForm(authForm);
     try {
       const response = await signIn(raw.email, raw.password);
@@ -2666,9 +2793,12 @@ appRoot.addEventListener("submit", async (event) => {
       state.user = response.data.user || (await getSessionUser());
       if (state.user) await initializeForUser(state.user, { redirectToDashboard: true });
       showToast("Login realizado.");
+      setSaving(false);
     } catch (error) {
       console.error(error);
       showToast(authErrorMessage(error));
+      setSaving(false);
+      if (loginButton) loginButton.disabled = false;
     }
     pendingScrollRestore = null;
     return;
@@ -2677,6 +2807,7 @@ appRoot.addEventListener("submit", async (event) => {
   const cardInvoiceForm = event.target.closest("[data-card-invoice-id]");
   if (cardInvoiceForm) {
     event.preventDefault();
+    setSaving(true);
     const card = state.data.cards.find((item) => item.id === cardInvoiceForm.dataset.cardId);
     if (!card) return;
     try {
@@ -2693,6 +2824,7 @@ appRoot.addEventListener("submit", async (event) => {
       pendingScrollRestore = null;
       console.error(error);
       showToast(error.message || "Não foi possível pagar a fatura.");
+      setSaving(false);
     }
     return;
   }
@@ -2700,6 +2832,7 @@ appRoot.addEventListener("submit", async (event) => {
   const pendingForm = event.target.closest("[data-pending-id]");
   if (pendingForm) {
     event.preventDefault();
+    setSaving(true);
     const plan = state.data.planningItems.find((item) => item.id === pendingForm.dataset.pendingId);
     if (!plan) return;
     try {
@@ -2709,6 +2842,7 @@ appRoot.addEventListener("submit", async (event) => {
       pendingScrollRestore = null;
       console.error(error);
       showToast(error.message || "Não foi possível criar a movimentação.");
+      setSaving(false);
     }
     return;
   }
@@ -2716,12 +2850,16 @@ appRoot.addEventListener("submit", async (event) => {
   const form = event.target.closest("[data-form]");
   if (!form) return;
   event.preventDefault();
+  setSaving(true);
+  form.querySelectorAll('button[type="submit"]').forEach((button) => { button.disabled = true; });
   try {
     await handleFormSubmit(form);
   } catch (error) {
     pendingScrollRestore = null;
     console.error(error);
     showToast(error.message || "Não foi possível salvar.");
+    setSaving(false);
+    form.querySelectorAll('button[type="submit"]').forEach((button) => { button.disabled = false; });
   }
 });
 
@@ -2744,6 +2882,12 @@ appRoot.addEventListener(
 );
 
 appRoot.addEventListener("change", (event) => {
+  const transactionType = event.target.closest('[data-form="transaction"] [name="type"]');
+  if (transactionType) {
+    transactionType.form.querySelectorAll('[data-transaction-field="transfer"]').forEach((field) => {
+      field.classList.toggle("is-hidden", transactionType.value !== "transfer");
+    });
+  }
   const filter = event.target.closest("[data-transaction-filter]");
   if (!filter) return;
   const key = filter.dataset.transactionFilter;
@@ -2757,6 +2901,20 @@ appRoot.addEventListener("change", (event) => {
   render();
 });
 
+appRoot.addEventListener("input", (event) => {
+  if (event.target.closest("form") && !event.target.matches("[data-transaction-search]")) state.formDirty = true;
+  const search = event.target.closest("[data-transaction-search]");
+  if (!search) return;
+  state.query = search.value;
+  const finance = calculateFinance(state.data, state.month);
+  const records = filteredTransactions(monthlyTransactionRecords(finance));
+  const results = appRoot.querySelector("[data-transaction-results]");
+  if (results) results.innerHTML = transactionsTable(records);
+  const count = appRoot.querySelector(".transactions-list-panel .table-subtitle");
+  if (count) count.textContent = `${records.length} lançamento(s) encontrados`;
+  refreshIcons();
+});
+
 appRoot.addEventListener("click", async (event) => {
   const monthTarget = event.target.closest("[data-month]");
   if (monthTarget) {
@@ -2766,6 +2924,33 @@ appRoot.addEventListener("click", async (event) => {
   const target = event.target.closest("[data-action]");
   if (!target) return;
   const action = target.dataset.action;
+
+  if (action === "forgot-password") {
+    const email = appRoot.querySelector('[data-form="auth-login"] [name="email"]')?.value.trim();
+    if (!email) { showToast("Informe seu e-mail para recuperar a senha.", "error"); return; }
+    try {
+      setSaving(true);
+      await requestPasswordReset(email, window.location.origin);
+      showToast("Enviamos as instruções de recuperação para seu e-mail.");
+    } catch (error) {
+      showToast(error.message || "Não foi possível enviar a recuperação.", "error");
+    } finally {
+      setSaving(false);
+    }
+    return;
+  }
+
+  if (action === "go-pending") {
+    window.location.hash = "#/pending";
+    return;
+  }
+
+  if (action === "focus-pending") {
+    const form = document.getElementById(target.dataset.pendingForm);
+    form?.scrollIntoView({ behavior: "smooth", block: "center" });
+    window.setTimeout(() => form?.querySelector('[name="amount"]')?.focus(), 260);
+    return;
+  }
 
   if (action === "open-quick-add") {
     state.quickAddOpen = true;
@@ -2806,7 +2991,7 @@ appRoot.addEventListener("click", async (event) => {
   }
 
   if (action === "delete") {
-    if (!window.confirm("Excluir este registro?")) return;
+    if (!(await confirmAction({ title: "Excluir registro?", message: "Esta ação não poderá ser desfeita.", confirmLabel: "Excluir", danger: true }))) return;
     const collection = target.dataset.collection;
     const tableMap = { transactions: "transactions" };
     try {
@@ -2823,6 +3008,7 @@ appRoot.addEventListener("click", async (event) => {
   }
 
   if (action === "undo-pending") {
+    if (!(await confirmAction({ title: "Desfazer confirmação?", message: "A movimentação criada para este compromisso será removida.", confirmLabel: "Desfazer", danger: true }))) return;
     try {
       await dbDelete("transactions", target.dataset.transactionId);
       await persist("Pagamento desfeito.");
@@ -2845,10 +3031,6 @@ appRoot.addEventListener("click", async (event) => {
   }
 
   if (action === "export") exportData(state.data);
-  if (action === "import") showToast("Importação para Supabase ainda não foi implementada.");
-  if (action === "reset") {
-    showToast("Reset remoto não foi habilitado para evitar apagar dados por engano.");
-  }
   if (action === "logout") {
     if (LOCAL_AUTH_BYPASS) {
       showToast("Modo local temporário ativo.");
