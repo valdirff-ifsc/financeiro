@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { calculateFinance, withFinanceMeta } from "../src/calculations.js";
+import { calculateFinance, cardInstallmentAmount, withFinanceMeta } from "../src/calculations.js";
 
 function data(overrides = {}) {
   return {
@@ -58,4 +58,8 @@ test("não soma cobranças planejadas sobre uma fatura C6 já importada", () => 
   const finance = calculateFinance(data({ cards: [card], planningItems: [plan], transactions: [importedPurchase] }), "2026-10", { includeEvolution: false });
   assert.equal(finance.cardData[0].invoice, 50);
   assert.deepEqual(finance.cardData[0].plannedCharges, []);
+});
+
+test("exibe o valor unitário da parcela armazenada como compromisso total", () => {
+  assert.equal(cardInstallmentAmount({ amount: 109.98, installments: 2 }), 54.99);
 });

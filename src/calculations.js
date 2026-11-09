@@ -201,8 +201,11 @@ function isCardPlanning(plan) {
   return plan.type === "expense" && plan.paymentMethod === "Cartão crédito" && Boolean(plan.cardId);
 }
 
-function matchingTransactionForPlan(transactions, plan) {
-  return transactions.find((transaction) => transaction.linkedPlanningId === plan.id);
+function matchingTransactionForPlan(transactions, plan, month = "") {
+  return transactions.find((transaction) =>
+    transaction.linkedPlanningId === plan.id
+    && (!month || String(transaction.date || "").slice(0, 7) === month),
+  );
 }
 
 export function planningOccurrences(data, month) {
@@ -212,10 +215,12 @@ export function planningOccurrences(data, month) {
     .filter((plan) => planningAppliesToMonth(plan, month))
     .filter((plan) => !isCardPlanning(plan))
     .map((plan) => {
-      const transaction = matchingTransactionForPlan(monthTransactions, plan);
+      // O vencimento pode cair no mês seguinte ao mês de referência.
+      // O vínculo do compromisso é a fonte de verdade para saber se foi pago.
+      const transaction = matchingTransactionForPlan(data.transactions, plan, month);
       const actualAmount = transaction ? toNumber(transaction.amount) : 0;
       const expectedAmount = toNumber(plan.amount);
-      const dueDate = makeDate(month, plan.day);
+      const dueDate = makeDate(addMonths(month, 1), plan.day);
       return {
         id: `${plan.id}:${month}`,
         planId: plan.id,
@@ -356,8 +361,14 @@ function cardSummary(data, month) {
     const purchases = data.transactions.filter(
       (transaction) => transaction.type === "card" && transaction.cardId === card.id,
     );
+    // A fatura exibida em Fixo deve refletir exatamente os lançamentos
+    // do cartão mostrados no mês analisado, usando o valor da parcela.
     const monthPurchases = purchases
-      .map((transaction) => cardTransactionForMonth(transaction, month, "statement"))
+      .map((transaction) => {
+        const meta = parseFinanceMeta(transaction.notes);
+        const basis = meta.source === "transaction-form" ? "spending" : "statement";
+        return cardTransactionForMonth(transaction, month, basis);
+      })
       .filter(Boolean);
     const plannedCharges = plannedCardCharges(data, month, card, monthPurchases);
     const invoice =
@@ -387,21 +398,20 @@ function cardSummary(data, month) {
 }
 
 function cardInvoiceOccurrences(data, month, cardData) {
-  const monthTransactions = transactionsForMonth(data, month);
   return cardData
     .filter((card) => toNumber(card.invoice) > 0)
     .map((card) => {
       const id = `card_invoice:${card.id}:${month}`;
-      const payment = monthTransactions.find(
+      const payment = data.transactions.find(
         (transaction) =>
           transaction.type === "transfer" &&
           transaction.cardId === card.id &&
           transaction.paymentMethod === "Pagamento de fatura" &&
-          String(transaction.notes || "").includes(id),
+          String(transaction.notes || "").split(" · ")[0] === id,
       );
       const expectedAmount = toNumber(card.invoice);
       const actualAmount = payment ? toNumber(payment.amount) : 0;
-      const dueDate = makeDate(month, card.dueDay || 1);
+      const dueDate = makeDate(addMonths(month, 1), card.dueDay || 1);
       return {
         id,
         planId: "",

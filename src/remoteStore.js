@@ -363,8 +363,14 @@ export async function updateRemote(table, id, payload, idColumn = "id") {
 }
 
 export async function deleteRemote(table, id) {
-  const { error } = await supabase.from(table).delete().eq("id", id);
+  const { data, error } = await supabase.from(table).delete().eq("id", id).select("id");
   if (error) throw error;
+  if (!data?.length) {
+    const noRow = new Error("O registro não foi excluído. Verifique sua sessão e tente novamente.");
+    noRow.code = "DELETE_NO_ROWS";
+    throw noRow;
+  }
+  return data[0];
 }
 
 export function subscribeToHousehold(householdId, callback) {

@@ -3,28 +3,28 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Financeiro Pessoal</title>
+    <title>VC Finanças</title>
     <meta
       name="description"
       content="Sistema pessoal de controle financeiro com dashboard, cartões, contas, despesas, mercado, dívidas, receitas e investimentos."
     />
-    <meta name="theme-color" content="#0b1214" />
-    <meta name="application-name" content="Financeiro" />
-    <meta name="apple-mobile-web-app-title" content="Financeiro" />
+    <meta name="theme-color" content="#f3f0e8" />
+    <meta name="application-name" content="VC Finanças" />
+    <meta name="apple-mobile-web-app-title" content="VC Finanças" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <link rel="manifest" href="/manifest.json" />
-    <link rel="icon" type="image/png" sizes="192x192" href="/assets/icons/icon-192.png?v=12" />
-    <link rel="apple-touch-icon" href="/assets/icons/icon-192.png?v=12" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/assets/icons/icon-192.png?v=14" />
+    <link rel="apple-touch-icon" href="/assets/icons/icon-192.png?v=14" />
   </head>
   <body>
     <div class="app-shell">
       <aside class="sidebar" id="sidebar">
         <div class="brand">
-          <img class="brand-mark" src="/assets/icons/icon-192.png?v=12" alt="" />
+          <img class="brand-mark" src="/assets/icons/icon-192.png?v=14" alt="Monograma VC" />
           <div>
-            <strong>Financeiro</strong>
-            <span>controle pessoal</span>
+            <strong>VC Finanças</strong>
+            <span>casa &amp; futuro</span>
           </div>
           <button class="icon-button mobile-only sidebar-close" id="sidebarClose" type="button" aria-label="Fechar menu">
             <i data-lucide="x"></i>
@@ -46,10 +46,6 @@
           </div>
 
           <div class="topbar-actions month-toolbar" aria-label="Controle do mês analisado">
-            <button class="button quick-add-trigger" id="quickAddButton" type="button">
-              <i data-lucide="plus"></i>
-              <span>Adicionar</span>
-            </button>
             <button class="icon-button month-nav" id="monthPrev" type="button" aria-label="Mês anterior">
               <i data-lucide="chevron-left"></i>
             </button>
@@ -85,6 +81,25 @@
     <script>
       if ("serviceWorker" in navigator) {
         window.addEventListener("load", () => {
+          const localDevelopment = ["localhost", "127.0.0.1"].includes(window.location.hostname);
+          if (localDevelopment) {
+            Promise.all([
+              navigator.serviceWorker.getRegistrations().then((registrations) =>
+                Promise.all(registrations.map((registration) => registration.unregister())),
+              ),
+              caches.keys().then((keys) =>
+                Promise.all(keys.filter((key) => /^(financeiro-pwa|vc-financas)-/.test(key)).map((key) => caches.delete(key))),
+              ),
+            ]).then(() => {
+              if (navigator.serviceWorker.controller && !sessionStorage.getItem("vc-local-sw-cleared")) {
+                sessionStorage.setItem("vc-local-sw-cleared", "1");
+                window.location.reload();
+                return;
+              }
+              sessionStorage.removeItem("vc-local-sw-cleared");
+            });
+            return;
+          }
           navigator.serviceWorker.register("/sw.js").catch((error) => {
             console.warn("Service worker não registrado.", error);
           });

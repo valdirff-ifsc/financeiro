@@ -1,13 +1,15 @@
 import { defaultData } from "./data.js";
 import {
-  Activity, ArrowDownLeft, ArrowRight, ArrowRightLeft, ArrowUpRight, Banknote, CalendarCheck,
+  Activity, ArrowDownLeft, ArrowDownUp, ArrowRight, ArrowRightLeft, ArrowUpRight, Banknote, BadgeDollarSign, CalendarCheck,
   CalendarClock, CalendarRange, ChartNoAxesCombined, Check, ChevronLeft, ChevronRight,
-  CircleCheckBig, CreditCard, Download, Equal, HandCoins, Info, Landmark, Layers3,
-  LayoutDashboard, ListChecks, LogIn, LogOut, Menu, Minus, Pause, Pencil, Percent,
-  PiggyBank, Play, Plus, Repeat2, Save, Settings, Settings2, ShieldCheck, ShoppingBasket,
+  CircleCheckBig, CircleDollarSign, CreditCard, Download, Equal, FileText, HandCoins, House, Info, Landmark, Layers3,
+  LayoutDashboard, ListChecks, LogIn, LogOut, Menu, Minus, Pause, Pencil, Percent, SquarePen, CalendarDays,
+  PiggyBank, Play, Plus, ReceiptText, Repeat2, Save, Settings, Settings2, ShieldCheck, ShoppingBasket,
   Sparkles, Tags, Target, Trash2, TrendingUp, Undo2, Wallet, WalletCards, X, createIcons,
+  Wifi,
 } from "lucide";
 import "../styles/main.css";
+import "../styles/vc.css";
 import { exportData, loadData, saveData } from "./storage.js";
 import {
   deleteRemote,
@@ -68,7 +70,6 @@ const yearInput = document.querySelector("#yearInput");
 const toast = document.querySelector("#toast");
 const modalRoot = document.querySelector("#modalRoot");
 const confirmDialog = document.querySelector("#confirmDialog");
-const quickAddButton = document.querySelector("#quickAddButton");
 const LOCAL_AUTH_BYPASS = import.meta.env.DEV && import.meta.env.VITE_LOCAL_AUTH_BYPASS === "true";
 const localUser = {
   id: "local-user",
@@ -106,6 +107,14 @@ function setRoute(route, updateHash = true) {
   }
 }
 
+function keepManualEntryContext(month = "") {
+  state.route = "future";
+  if (/^\d{4}-\d{2}$/.test(month)) state.month = month;
+  if (window.location.hash !== "#/future") {
+    window.history.replaceState(null, "", "#/future");
+  }
+}
+
 function resetAuthenticatedState() {
   state.user = null;
   state.data = defaultData;
@@ -130,6 +139,8 @@ async function initializeForUser(user, options = {}) {
   if (activeInitialization?.userId === user.id) return activeInitialization.promise;
   const promise = (async () => {
     state.user = user;
+    // Sempre reabre no mês civil atual, respeitando a data local do dispositivo.
+    state.month = currentMonth();
     const remote = await loadRemoteData(user);
     state.data = remote.data;
     state.householdId = remote.householdId;
@@ -161,6 +172,7 @@ async function bootstrap() {
     state.user = localUser;
     state.data = loadData();
     state.householdId = "local-household";
+    state.month = currentMonth();
     state.authReady = true;
     render();
     return;
@@ -185,9 +197,10 @@ async function bootstrap() {
 
 const navItems = [
   { route: "dashboard", label: "Hoje", icon: "layout-dashboard" },
-  { route: "pending", label: "A fazer", icon: "list-checks" },
-  { route: "future", label: "Futuro", icon: "calendar-range" },
+  { route: "pending", label: "Fixo", icon: "repeat-2" },
+  { route: "future", label: "Lançar", icon: "square-pen" },
   { route: "history", label: "Histórico", icon: "chart-no-axes-combined" },
+  { route: "investments", label: "Investimentos", icon: "piggy-bank" },
   { route: "goals", label: "Metas", icon: "target" },
   { route: "registrations", label: "Cadastros", icon: "settings-2" },
 ];
@@ -283,12 +296,13 @@ function titleCase(value) {
 
 function refreshIcons() {
   createIcons({ icons: {
-    Activity, ArrowDownLeft, ArrowRight, ArrowRightLeft, ArrowUpRight, Banknote, CalendarCheck,
+    Activity, ArrowDownLeft, ArrowDownUp, ArrowRight, ArrowRightLeft, ArrowUpRight, BadgeDollarSign, Banknote, CalendarCheck,
     CalendarClock, CalendarRange, ChartNoAxesCombined, Check, ChevronLeft, ChevronRight,
-    CircleCheckBig, CreditCard, Download, Equal, HandCoins, Info, Landmark, Layers3,
-    LayoutDashboard, ListChecks, LogIn, LogOut, Menu, Minus, Pause, Pencil, Percent,
-    PiggyBank, Play, Plus, Repeat2, Save, Settings, Settings2, ShieldCheck, ShoppingBasket,
+    CircleCheckBig, CircleDollarSign, CreditCard, Download, Equal, FileText, HandCoins, House, Info, Landmark, Layers3,
+    LayoutDashboard, ListChecks, LogIn, LogOut, Menu, Minus, Pause, Pencil, Percent, SquarePen, CalendarDays,
+    PiggyBank, Play, Plus, ReceiptText, Repeat2, Save, Settings, Settings2, ShieldCheck, ShoppingBasket,
     Sparkles, Tags, Target, Trash2, TrendingUp, Undo2, Wallet, WalletCards, X,
+    Wifi,
   } });
 }
 
@@ -387,7 +401,7 @@ async function refreshRemoteOnResume() {
 window.addEventListener("focus", refreshRemoteOnResume);
 document.addEventListener("visibilitychange", refreshRemoteOnResume);
 
-async function persist(message) {
+async function persist(message, options = {}) {
   const scrollState = pendingScrollRestore || captureScrollState();
   if (LOCAL_AUTH_BYPASS) {
     state.formDirty = false;
@@ -402,7 +416,7 @@ async function persist(message) {
     return;
   }
 
-  await reloadRemote();
+  if (!options.keepCurrentData) await reloadRemote();
   state.formDirty = false;
   render();
   restoreScrollState(scrollState);
@@ -533,7 +547,12 @@ function localFromDb(table, row) {
 async function dbInsert(table, payload) {
   if (!LOCAL_AUTH_BYPASS) {
     ignoreRealtimeUntil = Date.now() + 1800;
-    return insertRemote(table, payload);
+    const row = await insertRemote(table, payload);
+    const collection = tableCollections[table];
+    if (!collection) return row;
+    const item = localFromDb(table, row);
+    state.data[collection] = [item, ...state.data[collection].filter((current) => current.id !== item.id)];
+    return item;
   }
   const collection = tableCollections[table];
   if (!collection) return null;
@@ -656,14 +675,14 @@ function dueText(occurrence) {
 function routeMeta(route) {
   const map = {
     dashboard: ["Hoje", "Quanto ainda podemos gastar"],
-    pending: ["A fazer", "Pagamentos e recebimentos do mês"],
-    future: ["Futuro", "Compromissos e previsão dos próximos meses"],
+    pending: ["Fixo", "Receitas e despesas recorrentes do mês"],
+    future: ["Lançar receitas e despesas", "Registre manualmente os movimentos da conta e dos cartões"],
     history: ["Histórico", "O que aconteceu de verdade"],
     registrations: ["Cadastros", "Estrutura e regras do financeiro"],
     transactions: ["Movimentações", "Eventos financeiros reais"],
     accounts: ["Contas bancárias", "Saldos e fluxo por conta"],
     cards: ["Cartões", "Faturas, limites e compras"],
-    planning: ["Compromissos", "Recorrências que alimentam a previsão"],
+    planning: ["Fixo", "Receitas e despesas recorrentes do mês"],
     goals: ["Metas", "Limites mensais por categoria"],
     investments: ["Investimentos", "Patrimônio investido"],
     categories: ["Categorias", "Classificação e orçamentos"],
@@ -674,7 +693,7 @@ function routeMeta(route) {
 }
 
 function renderNav() {
-  const registrationRoutes = ["accounts", "cards", "planning", "categories", "investments", "market", "settings"];
+  const registrationRoutes = ["accounts", "cards", "planning", "categories", "market", "settings"];
   const routeButtons = navItems
     .map(
       (item) => `
@@ -723,7 +742,6 @@ function render() {
     pageTitle.textContent = "Carregando";
     pageEyebrow.textContent = "Conectando ao Supabase";
     appRoot.innerHTML = `<section class="auth-shell"><div class="auth-card"><h2>Carregando seus dados...</h2><p>Conectando ao Supabase e verificando a sessão.</p></div></section>`;
-    quickAddButton.hidden = true;
     modalRoot.innerHTML = "";
     refreshIcons();
     return;
@@ -735,7 +753,6 @@ function render() {
     pageEyebrow.textContent = "Financeiro pessoal";
     sidebarNav.innerHTML = "";
     appRoot.innerHTML = renderAuth();
-    quickAddButton.hidden = true;
     modalRoot.innerHTML = "";
     refreshIcons();
     return;
@@ -747,7 +764,6 @@ function render() {
   pageEyebrow.textContent = eyebrow;
   renderMonthSelector();
   renderNav();
-  quickAddButton.hidden = false;
 
   const routes = {
     dashboard: renderDashboard,
@@ -758,7 +774,7 @@ function render() {
     transactions: renderTransactions,
     accounts: renderAccounts,
     cards: renderCards,
-    planning: renderPlanning,
+    planning: renderPending,
     goals: renderGoals,
     investments: renderInvestments,
     categories: renderCategories,
@@ -818,6 +834,13 @@ function renderQuickAddModal() {
   if (!modalRoot.querySelector('[role="dialog"]')) modalReturnFocus = document.activeElement;
   const defaultDate = state.month === currentMonth() ? localToday() : `${state.month}-01`;
   const preset = state.quickAddPreset || {};
+  if (preset.planningEdit) {
+    const record = state.data.planningItems.find((item) => item.id === preset.planningEdit);
+    modalRoot.innerHTML = `<div class="modal-backdrop" data-action="close-quick-add"><section class="universal-modal" role="dialog" aria-modal="true"><div class="modal-header"><div><span class="eyebrow">Fixo</span><h2>Editar recorrência</h2></div><button class="icon-button modal-close" type="button" data-action="close-quick-add"><i data-lucide="x"></i></button></div>${planningForm(record || {})}</section></div>`;
+    document.body.classList.add("modal-open");
+    refreshIcons();
+    return;
+  }
   const openLoans = loanSummary().borrowers;
   modalRoot.innerHTML = `
     <div class="modal-backdrop" data-action="close-quick-add">
@@ -1028,57 +1051,50 @@ async function saveUniversalEntry(form, keepOpen = false) {
 
 function renderDashboard() {
   const finance = calculateFinance(state.data, state.month);
-  const highPriority = finance.todayTasks;
-  const budgets = finance.categoryBudgets.filter((category) => category.budget > 0);
-  const loans = loanSummary();
+  const budgets = finance.categoryBudgets.filter((category) => category.budget > 0 || category.spent > 0);
+  // O limite mensal representa a soma das receitas planejadas do mês.
+  // Metas/limites individuais das categorias não alteram esse valor.
+  const monthLimit = Math.max(0, finance.plannedIncome || finance.actualIncome + finance.pendingIncome);
+  const accountExpenses = finance.transactions
+    .filter((transaction) => transaction.type === "expense")
+    .reduce((total, transaction) => total + Number(transaction.amount || 0), 0);
+  const fixedExpenses = finance.pendingOccurrences
+    .filter((occurrence) => occurrence.source !== "card_invoice" && occurrence.type === "expense")
+    .reduce((total, occurrence) => total + Number(occurrence.expectedAmount || 0), 0);
+  const totalMonthIncome = finance.actualIncome + finance.pendingIncome;
+  const cardInvoiceTotal = finance.cardData.reduce((total, card) => total + Number(card.invoice || 0), 0);
+  const totalMonthExpenses = accountExpenses + fixedExpenses + cardInvoiceTotal;
+  const availableTotal = totalMonthIncome - totalMonthExpenses;
+  const investedTotal = Number(finance.investments?.total || 0);
+  const spentPercent = monthLimit > 0 ? Math.min(100, (totalMonthExpenses / monthLimit) * 100) : 0;
 
   return `
-    <section class="today-overview">
-      <article class="spending-power ${finance.categoryBudget.configuredCount > 0 && finance.categoryBudget.availableForNewSpending <= 0 ? "is-alert" : ""}">
-        <span class="summary-kicker">Ainda podemos decidir gastar em ${escapeHtml(monthLabel(state.month))}</span>
-        <strong>${formatCurrency(finance.categoryBudget.availableForNewSpending)}</strong>
-        <p>Este valor já desconta contas previstas, parcelas e reservas das metas por categoria.</p>
-        <div class="availability-grid">
-          <span><b>${formatCurrency(finance.actualExpense)}</b> já gasto</span>
-          <span><b>${formatCurrency(finance.categoryBudget.committed)}</b> comprometido</span>
-          <span><b>${formatCurrency(finance.categoryBudget.reserved)}</b> reservado nas metas</span>
-        </div>
-        <button class="button inverted" type="button" data-action="open-quick-add"><i data-lucide="plus"></i><span>Registrar compra</span></button>
-      </article>
-
-      <article class="panel today-actions">
-        <div class="panel-header">
-          <div>
-            <h2 class="panel-title">O que pede atenção</h2>
-            <p class="panel-subtitle">Vencimentos dos próximos 7 dias.</p>
-          </div>
-          <a class="action-link" href="#/pending">Ver tudo</a>
-        </div>
-        <div class="task-list">
-          ${highPriority.length ? highPriority.map((item) => dashboardTask(item)).join("") : `<div class="empty-state compact">Tudo em dia por aqui.</div>`}
-        </div>
-      </article>
+    <section class="dashboard-hero panel">
+      <div class="panel-header">
+        <div><span class="summary-kicker">Resumo de ${escapeHtml(monthLabel(state.month))}</span><h1 class="dashboard-spent-title">${formatCurrency(availableTotal)}</h1><p class="panel-subtitle">disponível após receitas e gastos do mês</p></div>
+        <button class="button primary" type="button" data-action="open-quick-add"><i data-lucide="plus"></i><span>Registrar gasto</span></button>
+      </div>
+      <div class="dashboard-limit-row"><span>Limite mensal</span><strong>${formatCurrency(monthLimit)}</strong><span>${formatPercent(spentPercent / 100)} utilizado</span></div>
+      <div class="dashboard-limit-track"><div class="dashboard-limit-fill ${spentPercent >= 90 ? "is-alert" : ""}" style="width:${spentPercent}%"></div></div>
+      <div class="dashboard-source-grid">
+        <div><small>Fatura atual do cartão</small><strong>${formatCurrency(cardInvoiceTotal)}</strong></div>
+        <div><small>Investido</small><strong>${formatCurrency(investedTotal)}</strong></div>
+        <div><small>Gastos totais</small><strong>${formatCurrency(totalMonthExpenses)}</strong></div>
+      </div>
     </section>
 
     <section class="section-heading">
-      <div><h2>Quanto resta por categoria</h2><p>Gasto real + parcelas + recorrências já assumidas.</p></div>
+      <div><h2>Gastos por categoria</h2><p>Veja o que já foi gasto e quanto ainda cabe em cada limite.</p></div>
       <a class="action-link" href="#/goals">Ajustar metas</a>
     </section>
     <section class="budget-card-grid">
-      ${budgets.length ? budgets.map(categoryBudgetCard).join("") : `<article class="empty-state budget-empty"><strong>Nenhuma meta definida</strong><a class="button small" href="#/goals">Definir metas</a></article>`}
+      ${budgets.length ? budgets.map(categoryBudgetCard).join("") : `<article class="empty-state budget-empty"><strong>Defina limites por categoria para acompanhar seu mês.</strong><a class="button small" href="#/goals">Definir metas</a></article>`}
     </section>
 
     <section class="metric-grid compact-metrics">
-      ${metricCard({ label: "Receita do mês", value: formatCurrency(finance.actualIncome + finance.pendingIncome), note: `${formatCurrency(finance.pendingIncome)} ainda a receber`, icon: "wallet-cards", tone: "positive" })}
-      ${metricCard({ label: "Contas previstas", value: formatCurrency(finance.pendingExpense), note: "Inclui faturas e compromissos", icon: "calendar-clock" })}
-      ${metricCard({ label: "Saldo após o mês", value: formatCurrency(finance.saldoPrevistoFinal), note: "Se tudo previsto acontecer", icon: "arrow-right-left", tone: finance.saldoPrevistoFinal >= 0 ? "positive" : "negative" })}
-    </section>
-
-    ${renderLoansPanel(loans)}
-
-    <section class="dashboard-grid simplified-charts">
-      ${panel({ title: "Gastos realizados", subtitle: "Distribuição do que já aconteceu.", span: 5, body: donutChart(finance.byCategory, { centerLabel: "Gastos" }) })}
-      ${panel({ title: "Últimos meses", subtitle: "Receitas e despesas efetivamente registradas.", span: 7, body: groupedBarChart(finance.monthlyEvolution) })}
+      ${metricCard({ label: "Receita do mês", value: formatCurrency(finance.actualIncome), note: `${formatCurrency(finance.pendingIncome)} ainda a receber`, icon: "wallet-cards", tone: "positive" })}
+      ${metricCard({ label: "Compromissos", value: formatCurrency(finance.categoryBudget.committed), note: "Parcelas e recorrências", icon: "calendar-clock" })}
+      ${metricCard({ label: "Resultado parcial", value: formatCurrency(finance.actualIncome - finance.actualExpense), note: "Receitas menos gastos", icon: "arrow-right-left", tone: finance.actualIncome >= finance.actualExpense ? "positive" : "negative" })}
     </section>
   `;
 }
@@ -1115,9 +1131,10 @@ function categoryBudgetCard(category) {
 
 function dashboardTask(item) {
   const variant = item.daysUntil < 0 ? "danger" : item.daysUntil <= 1 ? "warning" : "neutral";
+  const icon = occurrenceIcon(item);
   return `
     <article class="task-item">
-      <span class="task-check" aria-hidden="true"></span>
+      <span class="task-icon is-${item.type}" aria-hidden="true"><i data-lucide="${icon}"></i></span>
       <div>
         <strong>${escapeHtml(item.name)}</strong>
         <span>${escapeHtml(dueText(item))} · ${formatCurrency(item.expectedAmount)}</span>
@@ -1127,36 +1144,87 @@ function dashboardTask(item) {
   `;
 }
 
+function occurrenceIcon(item) {
+  const name = normalize(item.name || "");
+  if (item.status === "done") return "circle-check-big";
+  if (item.type === "income") return "badge-dollar-sign";
+  if (item.source === "card_invoice") return "credit-card";
+  if (item.group === "subscription") return "repeat-2";
+  if (item.group === "market" || /mercado|supermercado|feira/.test(name)) return "shopping-basket";
+  if (/aluguel|condominio|moradia/.test(name)) return "house";
+  if (/internet|unifique|telefone|celular/.test(name)) return "wifi";
+  if (/seguro|protecao/.test(name)) return "shield-check";
+  if (/boleto|fatura|conta/.test(name)) return "receipt-text";
+  return "file-text";
+}
+
 function renderPending() {
   const finance = calculateFinance(state.data, state.month);
   const incomes = finance.occurrences.filter((item) => item.type === "income");
   const expenses = finance.occurrences.filter((item) => item.type === "expense");
+  const accountExpenses = expenses;
+  const cardExpenses = state.data.planningItems
+    .filter((plan) => plan.active && plan.type === "expense" && plan.paymentMethod === "Cartão crédito" && plan.cardId)
+    .map((plan) => {
+      const transaction = finance.transactions.find((item) => item.linkedPlanningId === plan.id);
+      return {
+        id: `${plan.id}:${state.month}`,
+        planId: plan.id,
+        plan,
+        source: "planning",
+        type: "expense",
+        name: plan.name,
+        expectedAmount: Number(plan.amount || 0),
+        actualAmount: transaction ? Number(transaction.amount || 0) : 0,
+        difference: transaction ? Number(transaction.amount || 0) - Number(plan.amount || 0) : 0,
+        dueDate: `${addMonths(state.month, 1)}-${String(plan.day || 1).padStart(2, "0")}`,
+        transaction,
+        status: transaction ? "done" : "pending",
+        daysUntil: 0,
+      };
+    });
+  const editing = state.editing.planning_items ? state.data.planningItems.find((item) => item.id === state.editing.planning_items) : null;
 
   return `
     <section class="module-page">
-      <div class="focus-strip">
+      <section class="pending-summary panel">
+        <div><span class="summary-kicker">${escapeHtml(monthLabel(state.month))}</span><h2>Fixo</h2></div>
+        <button class="button primary" type="button" data-action="open-quick-add"><i data-lucide="plus"></i><span>Adicionar fixo</span></button>
+      </section>
+      <div class="focus-strip pending-totals">
         <div>
-          <span>Saldo após pendências</span>
+          <span>Saldo projetado</span>
           <strong>${formatCurrency(finance.saldoAposPendencias)}</strong>
         </div>
         <div>
-          <span>Falta receber</span>
+          <span>A receber</span>
           <strong>${formatCurrency(finance.pendingIncome)}</strong>
         </div>
         <div>
-          <span>Falta pagar</span>
+          <span>A pagar</span>
           <strong>${formatCurrency(finance.pendingExpense)}</strong>
         </div>
       </div>
       <section class="pending-columns">
-        ${pendingColumn("Receitas previstas", incomes, "A RECEBER", "RECEBIDO")}
-        ${pendingColumn("Despesas previstas", expenses, "A PAGAR", "PAGO")}
+        ${pendingColumn("Receitas", incomes, "Receber", "Recebido")}
+        ${pendingColumn("Despesas da conta", accountExpenses, "Pagar", "Pago")}
+        ${pendingColumn("Despesas do cartão", cardExpenses, "Pagar", "Pago")}
       </section>
+      ${editing ? `<section class="panel fixed-edit-panel"><div class="panel-header"><div><h2 class="panel-title">Editar fixo</h2></div><button class="icon-button" type="button" data-action="cancel-edit" data-collection="planning_items" aria-label="Fechar edição"><i data-lucide="x"></i></button></div>${planningForm(editing)}</section>` : ""}
     </section>
   `;
 }
 
 function renderFuture() {
+  return `
+    <section class="module-page manual-entry-page">
+      ${renderTransactions({ includeStats: false })}
+    </section>
+  `;
+  /*
+   * A previsão detalhada foi removida desta área para deixar o lançamento
+   * manual direto. Os compromissos recorrentes continuam em A fazer/Cadastros.
+   */
   let rollingBalance = calculateFinance(state.data, state.month).saldoPrevistoFinal;
   const months = Array.from({ length: 6 }, (_, index) => addMonths(state.month, index + 1)).map((month) => {
     const finance = calculateFinance(state.data, month, { includeEvolution: false });
@@ -1252,7 +1320,6 @@ function renderRegistrations() {
     <section class="registration-grid">
       ${registrationCard("landmark", "Contas", `${state.data.accounts.length} cadastrada(s)`, "Saldos e conta principal", "accounts")}
       ${registrationCard("credit-card", "Cartões", cardsLabel, "Limite, fechamento e vencimento", "cards")}
-      ${registrationCard("repeat-2", "Compromissos", `${activeCommitments} ativo(s)`, "Assinaturas, boletos e PIX recorrentes", "planning")}
       ${registrationCard("tags", "Categorias", `${state.data.categories.length} cadastrada(s)`, "Organização dos gastos e receitas", "categories")}
       ${registrationCard("piggy-bank", "Investimentos", `${state.data.investments.length} cadastrado(s)`, "Patrimônio separado do orçamento", "investments")}
       ${registrationCard("shopping-basket", "Mercado", `${state.data.marketHistory.length} mês(es) no histórico`, "Previsão e grupos de compra", "market")}
@@ -1271,7 +1338,7 @@ function pendingColumn(title, items, pendingLabel, doneLabel) {
       <div class="panel-header">
         <div>
           <h2 class="panel-title">${escapeHtml(title)}</h2>
-          <p class="panel-subtitle">Marque para criar a movimentação real automaticamente.</p>
+          <p class="panel-subtitle">Itens recorrentes cadastrados.</p>
         </div>
       </div>
       <div class="pending-list">
@@ -1282,24 +1349,29 @@ ${items.map((item) => pendingItem(item, pendingLabel, doneLabel)).join("")}
 }
 
 function pendingItem(item, pendingLabel, doneLabel) {
-  const isDone = item.status === "done";
+  const isCardFixed = item.plan?.paymentMethod === "Cartão crédito";
+  const isDone = item.status === "done" && !isCardFixed;
+  const icon = occurrenceIcon(item);
   const details = item.source === "card_invoice" && item.plannedCharges?.length
     ? `Inclui ${item.plannedCharges.length} recorrência(s) planejada(s) no cartão`
     : "";
-  const formAttribute =
-    item.source === "card_invoice"
-      ? `data-card-invoice-id="${escapeHtml(item.id)}" data-card-id="${escapeHtml(item.cardId)}"`
-      : `data-pending-id="${escapeHtml(item.planId)}"`;
+  const formAttribute = item.source === "card_invoice"
+    ? `data-card-invoice-id="${escapeHtml(item.id)}" data-card-id="${escapeHtml(item.cardId)}"`
+    : `data-pending-id="${escapeHtml(item.planId)}"`;
   const undoButton = item.transaction?.id
     ? `<button class="action-link pending-undo" type="button" data-action="undo-pending" data-transaction-id="${escapeHtml(item.transaction.id)}"><i data-lucide="undo-2"></i><span>Desfazer</span></button>`
+    : "";
+  const editButton = item.source === "card_invoice" ? "" : `<span class="pending-item-actions"><button class="pending-edit" type="button" data-action="edit-pending" data-id="${escapeHtml(item.planId)}" title="Editar fixo"><i data-lucide="pencil"></i></button><button class="pending-edit pending-delete" type="button" data-action="delete" data-collection="planning_items" data-id="${escapeHtml(item.planId)}" title="Excluir fixo"><i data-lucide="trash-2"></i></button></span>`;
+  const cardInvoicePayButton = item.source === "card_invoice"
+    ? `<form class="pending-pay-form" data-card-invoice-id="${escapeHtml(item.id)}" data-card-id="${escapeHtml(item.cardId)}"><input type="hidden" name="amount" value="${escapeHtml(item.expectedAmount)}" /><input type="hidden" name="date" value="${escapeHtml(item.dueDate)}" /><button class="fixed-toggle" type="submit"><span></span><b>Pagar fatura</b></button></form>`
     : "";
   return `
     <article class="pending-item is-${item.type} ${isDone ? "is-done" : ""}">
       <div class="pending-main">
-        <button class="pending-check ${isDone ? "is-checked" : ""}" type="button" ${isDone ? "disabled" : `data-action="focus-pending" data-pending-form="pending-${escapeHtml(item.id)}"`} aria-label="${isDone ? escapeHtml(doneLabel) : escapeHtml(pendingLabel)}"></button>
+        <button class="pending-check is-${item.type} ${isDone ? "is-checked" : ""}" type="button" ${isDone ? "disabled" : `data-action="focus-pending" data-pending-form="pending-${escapeHtml(item.id)}"`} aria-label="${isDone ? escapeHtml(doneLabel) : escapeHtml(pendingLabel)}"><i data-lucide="${icon}"></i></button>
         <div>
-          <strong>${escapeHtml(item.name)}</strong>
-          <span>${formatDate(item.dueDate)} · previsto ${formatCurrency(item.expectedAmount)}</span>
+          <div class="pending-title-row"><strong>${escapeHtml(item.name)}</strong>${editButton}</div>
+          <span>${formatDate(item.dueDate)} · <b class="fixed-amount">${formatCurrency(item.expectedAmount)}</b></span>
           ${
             isDone
               ? `<em>Real: ${formatCurrency(item.actualAmount)} · diferença ${formatCurrency(item.difference)}</em>`
@@ -1318,23 +1390,17 @@ function pendingItem(item, pendingLabel, doneLabel) {
               ${undoButton}
             </div>
           `
-          : `
-            <form class="quick-realization" id="pending-${escapeHtml(item.id)}" ${formAttribute}>
-              <input name="amount" ${moneyInputAttributes()} value="${escapeHtml(item.expectedAmount)}" aria-label="Valor real" />
-              <input name="date" type="date" value="${escapeHtml(item.dueDate)}" aria-label="Data real" />
-              <input name="notes" type="text" placeholder="Observações" aria-label="Observações" />
-              <button class="button small quick-realization-button" type="submit">
-                <i data-lucide="check"></i>
-                <span>${escapeHtml(pendingLabel)}</span>
-              </button>
-            </form>
-          `
+          : item.source === "card_invoice"
+            ? cardInvoicePayButton
+            : isCardFixed
+              ? `<span class="fixed-card-note"><i data-lucide="credit-card"></i> Lançado no cartão</span>`
+            : `<button class="fixed-toggle" type="button" data-action="toggle-fixed" data-pending-id="${escapeHtml(item.planId)}" data-amount="${escapeHtml(item.expectedAmount)}" data-date="${escapeHtml(item.dueDate)}" aria-label="${escapeHtml(pendingLabel)}"><span></span><b>${escapeHtml(pendingLabel)}</b></button>`
       }
     </article>
   `;
 }
 
-function renderTransactions() {
+function renderTransactions(options = {}) {
   const finance = calculateFinance(state.data, state.month);
   const records = filteredTransactions(monthlyTransactionRecords(finance));
   const filters = state.filters.transactions || { scope: "all", accountId: "", cardId: "", categoryId: "" };
@@ -1344,7 +1410,7 @@ function renderTransactions() {
 
   return `
     <section class="module-page">
-      ${transactionQuickStats(records)}
+      ${options.includeStats === false ? "" : transactionQuickStats(records)}
       <section class="transactions-workspace">
       <section class="form-panel elevated transactions-form-panel" id="transactionForm">
         <div class="panel-header">
@@ -1352,17 +1418,24 @@ function renderTransactions() {
             <h2 class="panel-title">${editing ? "Editar movimentação" : "Novo lançamento"}</h2>
             <p class="panel-subtitle">Registre o evento financeiro real em menos de um minuto.</p>
           </div>
+          <button class="button transaction-submit-top" type="submit" form="transactionEntryForm">
+            <i data-lucide="save"></i><span>${editing ? "Salvar" : "Adicionar"}</span>
+          </button>
         </div>
         ${transactionForm(editing)}
       </section>
       <section class="table-panel transactions-list-panel">
-        <div class="table-header">
+        <div class="table-header transaction-table-header">
           <div>
             <h3 class="table-title">Movimentações de ${escapeHtml(monthLabel(state.month))}</h3>
             <p class="table-subtitle">${records.length} lançamento(s) encontrados</p>
           </div>
+          ${transactionFilters(filters)}
         </div>
-        ${transactionFilters(filters)}
+        <div class="transaction-total-bar" aria-live="polite">
+          <span>Total</span>
+          <strong data-transaction-total>${formatCurrency(transactionDisplayedTotal(records))}</strong>
+        </div>
         <div data-transaction-results>${transactionsTable(records)}</div>
       </section>
       </section>
@@ -1388,31 +1461,35 @@ function transactionQuickStats(records) {
 }
 
 function transactionForm(record = {}) {
-  const type = record?.type || "expense";
+  const type = record?.type || "card";
+  const defaultCardId = state.data.cards.find((card) => card.name?.trim().toLowerCase() === "c6 bank")?.id
+    || state.data.cards[0]?.id
+    || "";
+  const displayedAmount = record?.type === "card" ? cardInstallmentAmount(record) : record?.amount || "";
   return `
-    <form class="record-form" data-form="transaction">
+    <form class="record-form transaction-entry-form" id="transactionEntryForm" data-form="transaction">
       <label class="form-group">
-        <span class="form-label">Tipo</span>
+        <span class="form-label"><i data-lucide="arrow-down-up"></i> Tipo</span>
         <select name="type">${options(transactionTypes.map((type) => ({ value: type, label: titleCase(type) })), type)}</select>
       </label>
       <label class="form-group wide">
-        <span class="form-label">Descrição</span>
+        <span class="form-label"><i data-lucide="file-text"></i> Descrição</span>
         <input name="description" type="text" value="${escapeHtml(record?.description || "")}" required />
       </label>
       <label class="form-group">
-        <span class="form-label">Valor</span>
-        <input name="amount" ${moneyInputAttributes()} value="${escapeHtml(record?.amount || "")}" required />
+        <span class="form-label"><i data-lucide="circle-dollar-sign"></i> <span data-transaction-amount-label>${type === "card" ? "Valor da parcela" : "Valor"}</span></span>
+        <input name="amount" ${moneyInputAttributes()} value="${escapeHtml(displayedAmount)}" required />
       </label>
       <label class="form-group">
-        <span class="form-label">Data</span>
+        <span class="form-label"><i data-lucide="calendar-days"></i> Data</span>
         <input name="date" type="date" value="${escapeHtml(record?.date || `${state.month}-01`)}" required />
       </label>
       <label class="form-group">
-        <span class="form-label">Categoria</span>
+        <span class="form-label"><i data-lucide="tags"></i> Categoria</span>
         <select name="categoryId">${categoryOptions(record?.categoryId || "", type === "income" ? "income" : "expense")}</select>
       </label>
       <label class="form-group">
-        <span class="form-label">Conta bancária</span>
+        <span class="form-label"><i data-lucide="landmark"></i> Conta bancária</span>
         <select name="accountId">${accountOptions(record?.accountId || state.data.settings.mainAccountId)}</select>
       </label>
       <label class="form-group ${type === "transfer" ? "" : "is-hidden"}" data-transaction-field="transfer">
@@ -1424,15 +1501,15 @@ function transactionForm(record = {}) {
         <select name="toAccountId">${accountOptions(record?.toAccountId || "", true)}</select>
       </label>
       <label class="form-group">
-        <span class="form-label">Forma de pagamento</span>
-        <select name="paymentMethod">${options(paymentMethods, record?.paymentMethod || "PIX")}</select>
+        <span class="form-label"><i data-lucide="wallet-cards"></i> Forma de pagamento</span>
+        <select name="paymentMethod">${options(paymentMethods, record?.paymentMethod || "Cartão crédito")}</select>
       </label>
       <label class="form-group">
-        <span class="form-label">Cartão</span>
-        <select name="cardId">${cardOptions(record?.cardId || "", true)}</select>
+        <span class="form-label"><i data-lucide="credit-card"></i> Cartão</span>
+        <select name="cardId">${cardOptions(record?.cardId || defaultCardId, true)}</select>
       </label>
       <label class="form-group">
-        <span class="form-label">Parcelas</span>
+        <span class="form-label"><i data-lucide="layers-3"></i> Parcelas</span>
         <input name="installments" type="number" min="1" value="${escapeHtml(record?.installments || 1)}" />
       </label>
       <label class="form-group">
@@ -1454,14 +1531,7 @@ function transactionForm(record = {}) {
         <textarea name="notes">${escapeHtml(visibleNotes(record?.notes))}</textarea>
       </label>
       <div class="form-helper full">Responsável: ${escapeHtml(record?.createdBy ? memberName(record.createdBy) : currentUserName())}</div>
-      <div class="form-actions">
-        ${
-          record?.id
-            ? `<button class="button ghost" type="button" data-action="cancel-edit" data-collection="transactions"><i data-lucide="x"></i><span>Cancelar</span></button>`
-            : ""
-        }
-        <button class="button" type="submit"><i data-lucide="save"></i><span>${record?.id ? "Salvar" : "Adicionar"}</span></button>
-      </div>
+      ${record?.id ? `<div class="form-actions"><button class="button ghost" type="button" data-action="cancel-edit" data-collection="transactions"><i data-lucide="x"></i><span>Cancelar edição</span></button></div>` : ""}
     </form>
   `;
 }
@@ -1488,6 +1558,13 @@ function plannedCardTransactionRows(cardData) {
 
 function monthlyTransactionRecords(finance) {
   return [...finance.transactions, ...plannedCardTransactionRows(finance.cardData)];
+}
+
+function transactionDisplayedTotal(records) {
+  return records.reduce((total, transaction) => {
+    const amount = transaction.type === "card" ? cardInstallmentAmount(transaction) : toNumber(transaction.amount);
+    return total + amount;
+  }, 0);
 }
 
 function transactionFilters(filters) {
@@ -1890,7 +1967,7 @@ function planningList() {
                   <div class="row-actions">
                     <button class="action-link" type="button" data-action="edit" data-collection="planning_items" data-id="${item.id}"><i data-lucide="pencil"></i><span>Editar</span></button>
                     <button class="action-link" type="button" data-action="toggle-active" data-id="${item.id}"><i data-lucide="${item.active ? "pause" : "play"}"></i><span>${item.active ? "Desativar" : "Ativar"}</span></button>
-                    <button class="action-link" type="button" data-action="delete" data-collection="planning_items" data-id="${item.id}"><i data-lucide="trash-2"></i><span>Excluir</span></button>
+                    <button class="action-link danger-action" type="button" data-action="delete" data-collection="planning_items" data-id="${item.id}" title="Excluir compromisso"><i data-lucide="trash-2"></i><span>Excluir</span></button>
                   </div>
                 </td>
               </tr>
@@ -2339,7 +2416,7 @@ function cardPurchaseNotes(card, date, notes = "", source = "transaction", previ
     spendingMonth,
     statementMonth,
     invoiceMonth: statementMonth,
-    dueDate: makeDate(statementMonth, card?.dueDay || 1),
+    dueDate: makeDate(addMonths(statementMonth, 1), card?.dueDay || 1),
   });
 }
 
@@ -2347,17 +2424,20 @@ function normalizeTransaction(raw, previous = {}) {
   const paymentMethod = raw.paymentMethod || "PIX";
   let type = raw.type || previous.type || "expense";
   if (paymentMethod === "Cartão crédito" && type === "expense") type = "card";
+  if (paymentMethod !== "Cartão crédito" && type === "card") type = "expense";
   if (type === "card" && !raw.cardId) raw.cardId = state.data.cards[0]?.id || "";
   const card = state.data.cards.find((item) => item.id === raw.cardId);
   if (type === "card" && !card) throw new Error("Selecione um cartão para a compra no crédito.");
   const date = raw.date || `${state.month}-01`;
+  const installments = Math.max(1, toNumber(raw.installments) || 1);
+  const enteredAmount = toNumber(raw.amount);
   if (type === "transfer" && (!raw.fromAccountId || !raw.toAccountId)) throw new Error("Selecione as contas de origem e destino.");
   if (type === "transfer" && raw.fromAccountId === raw.toAccountId) throw new Error("A conta de destino deve ser diferente da origem.");
   return {
     ...previous,
     type,
     description: raw.description?.trim() || "Movimentação",
-    amount: toNumber(raw.amount),
+    amount: type === "card" ? enteredAmount * installments : enteredAmount,
     date,
     categoryId: raw.categoryId,
     accountId: raw.accountId,
@@ -2366,7 +2446,7 @@ function normalizeTransaction(raw, previous = {}) {
     paymentMethod,
     cardId: raw.cardId || "",
     linkedPlanningId: raw.linkedPlanningId || "",
-    installments: Math.max(1, toNumber(raw.installments) || 1),
+    installments,
     currentInstallment: Math.max(1, toNumber(raw.currentInstallment) || 1),
     status: "confirmed",
     notes: type === "card"
@@ -2441,16 +2521,25 @@ async function handleFormSubmit(form) {
   }
 
   if (kind === "transaction") {
+    const keepEntryPage = state.route === "future";
+    const entryMonth = String(raw.date || "").slice(0, 7);
     const editingId = state.editing.transactions;
     const previous = editingId ? state.data.transactions.find((item) => item.id === editingId) : {};
     const payload = toDbTransaction(normalizeTransaction(raw, previous), householdId, userId);
     if (editingId) {
       await dbUpdate("transactions", editingId, payload);
       state.editing.transactions = "";
+      if (keepEntryPage) keepManualEntryContext(entryMonth);
       await persist("Movimentação atualizada.");
     } else {
       await dbInsert("transactions", payload);
-      await persist("Movimentação criada.");
+      if (keepEntryPage) keepManualEntryContext(entryMonth);
+      await persist("Movimentação criada.", { keepCurrentData: true });
+    }
+    if (keepEntryPage) {
+      window.requestAnimationFrame(() => {
+        appRoot.querySelector('[data-form="transaction"] [name="description"]')?.focus();
+      });
     }
   }
 
@@ -2712,12 +2801,6 @@ document.querySelector("#monthToday").addEventListener("click", () => {
   setMonth(currentMonth());
 });
 
-quickAddButton.addEventListener("click", () => {
-  state.quickAddOpen = true;
-  state.quickAddPreset = null;
-  renderQuickAddModal();
-});
-
 modalRoot.addEventListener("click", (event) => {
   const close = event.target.closest('[data-action="close-quick-add"]');
   if (!close) return;
@@ -2732,14 +2815,21 @@ modalRoot.addEventListener("change", (event) => {
 });
 
 modalRoot.addEventListener("submit", async (event) => {
-  const form = event.target.closest('[data-form="universal-entry"]');
+  const form = event.target.closest('[data-form="universal-entry"], [data-form="planning"]');
   if (!form) return;
   event.preventDefault();
   setSaving(true);
   const submitter = event.submitter;
   form.querySelectorAll("button").forEach((button) => { button.disabled = true; });
   try {
-    await saveUniversalEntry(form, submitter?.dataset.keepOpen === "true");
+    if (form.dataset.form === "planning") {
+      await handleFormSubmit(form);
+      state.quickAddOpen = false;
+      state.quickAddPreset = null;
+      renderQuickAddModal();
+    } else {
+      await saveUniversalEntry(form, submitter?.dataset.keepOpen === "true");
+    }
   } catch (error) {
     console.error(error);
     showToast(error.message || "Não foi possível salvar.");
@@ -2851,7 +2941,11 @@ appRoot.addEventListener("submit", async (event) => {
   if (!form) return;
   event.preventDefault();
   setSaving(true);
-  form.querySelectorAll('button[type="submit"]').forEach((button) => { button.disabled = true; });
+  const submitButtons = [
+    ...form.querySelectorAll('button[type="submit"]'),
+    ...(form.id ? appRoot.querySelectorAll(`button[type="submit"][form="${form.id}"]`) : []),
+  ];
+  submitButtons.forEach((button) => { button.disabled = true; });
   try {
     await handleFormSubmit(form);
   } catch (error) {
@@ -2859,7 +2953,7 @@ appRoot.addEventListener("submit", async (event) => {
     console.error(error);
     showToast(error.message || "Não foi possível salvar.");
     setSaving(false);
-    form.querySelectorAll('button[type="submit"]').forEach((button) => { button.disabled = false; });
+    submitButtons.forEach((button) => { button.disabled = false; });
   }
 });
 
@@ -2888,6 +2982,14 @@ appRoot.addEventListener("change", (event) => {
       field.classList.toggle("is-hidden", transactionType.value !== "transfer");
     });
   }
+  const transactionPayment = event.target.closest('[data-form="transaction"] [name="paymentMethod"]');
+  const transactionFormElement = transactionType?.form || transactionPayment?.form;
+  if (transactionFormElement) {
+    const selectedType = transactionFormElement.elements.type?.value;
+    const selectedPayment = transactionFormElement.elements.paymentMethod?.value;
+    const amountLabel = transactionFormElement.querySelector("[data-transaction-amount-label]");
+    if (amountLabel) amountLabel.textContent = selectedType === "card" || selectedPayment === "Cartão crédito" ? "Valor da parcela" : "Valor";
+  }
   const filter = event.target.closest("[data-transaction-filter]");
   if (!filter) return;
   const key = filter.dataset.transactionFilter;
@@ -2912,6 +3014,8 @@ appRoot.addEventListener("input", (event) => {
   if (results) results.innerHTML = transactionsTable(records);
   const count = appRoot.querySelector(".transactions-list-panel .table-subtitle");
   if (count) count.textContent = `${records.length} lançamento(s) encontrados`;
+  const total = appRoot.querySelector("[data-transaction-total]");
+  if (total) total.textContent = formatCurrency(transactionDisplayedTotal(records));
   refreshIcons();
 });
 
@@ -2949,6 +3053,35 @@ appRoot.addEventListener("click", async (event) => {
     const form = document.getElementById(target.dataset.pendingForm);
     form?.scrollIntoView({ behavior: "smooth", block: "center" });
     window.setTimeout(() => form?.querySelector('[name="amount"]')?.focus(), 260);
+    return;
+  }
+
+  if (action === "edit-pending") {
+    state.editing.planning_items = target.dataset.id;
+    state.quickAddOpen = true;
+    state.quickAddPreset = { planningEdit: target.dataset.id };
+    renderQuickAddModal();
+    return;
+  }
+
+  if (action === "toggle-fixed") {
+    const plan = state.data.planningItems.find((item) => item.id === target.dataset.pendingId);
+    if (!plan) return;
+    try {
+      setSaving(true);
+      await dbInsert("transactions", toDbTransaction(transactionFromOccurrence(plan, {
+        amount: target.dataset.amount,
+        // O pagamento pertence ao mês analisado; o vencimento exibido pode
+        // estar no mês seguinte sem tirar a ocorrência da lista atual.
+        date: `${state.month}-${String(plan.day || 1).padStart(2, "0")}`,
+        notes: "",
+      }), state.householdId, state.user.id));
+      await persist(plan.type === "income" ? "Receita recebida." : "Despesa paga.");
+    } catch (error) {
+      console.error(error);
+      showToast(error.message || "Não foi possível atualizar o compromisso.");
+      setSaving(false);
+    }
     return;
   }
 
@@ -2995,6 +3128,30 @@ appRoot.addEventListener("click", async (event) => {
     const collection = target.dataset.collection;
     const tableMap = { transactions: "transactions" };
     try {
+      if (collection === "categories") {
+        const categoryId = target.dataset.id;
+        const fallback = state.data.categories.find((category) => category.name.trim().toLowerCase() === "outros");
+        if (!fallback || fallback.id === categoryId) {
+          showToast('Crie ou mantenha a categoria "Outros" antes de excluir.', "error");
+          return;
+        }
+        const linkedTransactions = state.data.transactions.filter((transaction) => transaction.categoryId === categoryId);
+        const linkedPlanning = state.data.planningItems.filter((item) => item.categoryId === categoryId);
+        for (const transaction of linkedTransactions) {
+          await dbUpdate("transactions", transaction.id, { category_id: fallback.id });
+        }
+        for (const item of linkedPlanning) {
+          await dbUpdate("planning_items", item.id, { category_id: fallback.id });
+        }
+      }
+      // A recurring commitment can have realized transactions linked to it.
+      // Remove only the link first so the commitment can be deleted safely.
+      if (collection === "planning_items") {
+        const linked = state.data.transactions.filter((transaction) => transaction.linkedPlanningId === target.dataset.id);
+        for (const transaction of linked) {
+          await dbUpdate("transactions", transaction.id, { planning_item_id: null });
+        }
+      }
       await dbDelete(tableMap[collection] || collection, target.dataset.id);
       await persist("Registro excluído.");
     } catch (error) {

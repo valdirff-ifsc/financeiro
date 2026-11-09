@@ -1,12 +1,12 @@
 {
-  "name": "Financeiro",
-  "short_name": "Financeiro",
-  "description": "Controle financeiro pessoal familiar.",
+  "name": "VC Finanças",
+  "short_name": "VC",
+  "description": "Finanças da casa, com clareza para o presente e o futuro.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
-  "theme_color": "#0b1214",
-  "background_color": "#0b1214",
+  "theme_color": "#f3f0e8",
+  "background_color": "#f3f0e8",
   "icons": [
     {
       "src": "assets/icons/icon-192.png",
