@@ -6,7 +6,7 @@ import {
   LayoutDashboard, ListChecks, LogIn, LogOut, Menu, Minus, Pause, Pencil, Percent, SquarePen, CalendarDays,
   PiggyBank, Play, Plus, ReceiptText, Repeat2, Save, Settings, Settings2, ShieldCheck, ShoppingBasket,
   Sparkles, Tags, Target, Trash2, TrendingUp, Undo2, Wallet, WalletCards, X, createIcons,
-  Wifi,
+  UserPlus, Wifi,
 } from "lucide";
 import "../styles/main.css";
 import "../styles/vc.css";
@@ -19,6 +19,7 @@ import {
   onAuthChange,
   requestPasswordReset,
   signIn,
+  signUp,
   signOut,
   subscribeToHousehold,
   toDbAccount,
@@ -85,6 +86,7 @@ const state = {
   editing: {},
   filters: {},
   authReady: false,
+  authMode: "login",
   user: null,
   householdId: "",
   unsubscribeRealtime: null,
@@ -302,7 +304,7 @@ function refreshIcons() {
     LayoutDashboard, ListChecks, LogIn, LogOut, Menu, Minus, Pause, Pencil, Percent, SquarePen, CalendarDays,
     PiggyBank, Play, Plus, ReceiptText, Repeat2, Save, Settings, Settings2, ShieldCheck, ShoppingBasket,
     Sparkles, Tags, Target, Trash2, TrendingUp, Undo2, Wallet, WalletCards, X,
-    Wifi,
+    UserPlus, Wifi,
   } });
 }
 
@@ -788,6 +790,7 @@ function render() {
 }
 
 function renderAuth() {
+  const creating = state.authMode === "signup";
   return `
     <section class="auth-shell">
       <article class="auth-card">
@@ -798,19 +801,19 @@ function renderAuth() {
             <span>assistente familiar</span>
           </div>
         </div>
-        <h2>Entre para sincronizar suas finanças</h2>
-        <p>Acesse com o e-mail e a senha cadastrados no Supabase.</p>
-        <form class="auth-form" data-form="auth-login">
+        <h2>${creating ? "Crie sua conta" : "Entre para sincronizar suas finanças"}</h2>
+        <p>${creating ? "Cadastre seu e-mail e uma senha para começar." : "Acesse com o e-mail e a senha cadastrados no Supabase."}</p>
+        <form class="auth-form" data-form="${creating ? "auth-signup" : "auth-login"}">
           <label class="field">
             <span>E-mail</span>
             <input name="email" type="email" autocomplete="email" required />
           </label>
           <label class="field">
             <span>Senha</span>
-            <input name="password" type="password" autocomplete="current-password" required />
+          <input name="password" type="password" autocomplete="${creating ? "new-password" : "current-password"}" minlength="6" required />
           </label>
-          <button class="button" type="submit"><i data-lucide="log-in"></i><span>Entrar</span></button>
-          <button class="action-link" type="button" data-action="forgot-password">Esqueci minha senha</button>
+          <button class="button" type="submit"><i data-lucide="${creating ? "user-plus" : "log-in"}"></i><span>${creating ? "Criar conta" : "Entrar"}</span></button>
+          ${creating ? '<button class="action-link" type="button" data-action="show-login">Já tenho uma conta</button>' : '<button class="action-link" type="button" data-action="forgot-password">Esqueci minha senha</button><button class="action-link" type="button" data-action="show-signup">Criar uma conta</button>'}
         </form>
       </article>
     </section>
@@ -2893,6 +2896,32 @@ appRoot.addEventListener("submit", async (event) => {
     pendingScrollRestore = null;
     return;
   }
+  const signupForm = event.target.closest('[data-form="auth-signup"]');
+  if (signupForm) {
+    event.preventDefault();
+    const button = signupForm.querySelector('button[type="submit"]');
+    if (button) button.disabled = true;
+    setSaving(true);
+    const raw = readForm(signupForm);
+    try {
+      const response = await signUp(raw.email, raw.password);
+      if (response.error) throw response.error;
+      if (response.data?.session) {
+        state.user = response.data.user;
+        await initializeForUser(state.user, { redirectToDashboard: true });
+        showToast("Conta criada e login realizado.");
+      } else {
+        state.authMode = "login";
+        render();
+        showToast("Conta criada. Confirme seu e-mail para entrar.");
+      }
+    } catch (error) {
+      showToast(authErrorMessage(error), "error");
+      if (button) button.disabled = false;
+    } finally { setSaving(false); }
+    pendingScrollRestore = null;
+    return;
+  }
 
   const cardInvoiceForm = event.target.closest("[data-card-invoice-id]");
   if (cardInvoiceForm) {
@@ -3041,6 +3070,11 @@ appRoot.addEventListener("click", async (event) => {
     } finally {
       setSaving(false);
     }
+    return;
+  }
+  if (action === "show-signup" || action === "show-login") {
+    state.authMode = action === "show-signup" ? "signup" : "login";
+    render();
     return;
   }
 

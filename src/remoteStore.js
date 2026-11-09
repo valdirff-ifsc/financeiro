@@ -54,6 +54,11 @@ export async function signIn(email, password) {
   return supabase.auth.signInWithPassword({ email, password });
 }
 
+export async function signUp(email, password) {
+  if (!supabaseConfigured) return { data: {}, error: new Error("Configure as variáveis do Supabase para criar a conta.") };
+  return supabase.auth.signUp({ email, password });
+}
+
 export async function signOut() {
   if (!supabaseConfigured) return;
   return supabase.auth.signOut();
