@@ -81,7 +81,23 @@ export async function loadRemoteData(user) {
     .select("household_id, role, display_name, households(id, name)")
     .eq("user_id", user.id)
     .order("created_at", { ascending: true });
-  const memberships = mustResponse(membershipResponse);
+  let memberships = mustResponse(membershipResponse);
+
+  // Novas contas entram no mesmo lar financeiro compartilhado.
+  if (!memberships?.length) {
+    const joinResponse = await supabase.rpc("join_shared_household");
+    if (joinResponse.error && !String(joinResponse.error.message || "").includes("No household available")) {
+      throw joinResponse.error;
+    }
+    if (!joinResponse.error) {
+      const refreshed = await supabase
+        .from("household_members")
+        .select("household_id, role, display_name, households(id, name)")
+        .eq("user_id", user.id)
+        .order("created_at", { ascending: true });
+      memberships = mustResponse(refreshed);
+    }
+  }
 
   let householdId = await resolveHouseholdId(user, memberships);
   if (!householdId) {
