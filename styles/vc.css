@@ -1578,3 +1578,32 @@ body.is-saving::before {
     border-radius: 22px 22px 0 0;
   }
 }
+/* Entrada do app: discreta, rápida e respeita acessibilidade. */
+@keyframes vc-shell-in {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes vc-logo-in {
+  0% { opacity: 0; transform: scale(.82) rotate(-5deg); }
+  70% { opacity: 1; transform: scale(1.04) rotate(1deg); }
+  100% { opacity: 1; transform: scale(1) rotate(0); }
+}
+
+body:not(.auth-mode) .app-shell {
+  animation: vc-shell-in .55s cubic-bezier(.22, .8, .25, 1) both;
+}
+
+body:not(.auth-mode) .brand-mark {
+  animation: vc-logo-in .7s cubic-bezier(.22, .8, .25, 1) .08s both;
+}
+
+body.auth-mode .auth-shell {
+  animation: vc-shell-in .5s cubic-bezier(.22, .8, .25, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  body:not(.auth-mode) .app-shell,
+  body:not(.auth-mode) .brand-mark,
+  body.auth-mode .auth-shell { animation: none; }
+}
