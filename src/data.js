@@ -34,4 +34,6 @@ export const defaultData = {
   marketGroups: [],
   investments: [],
   investmentHistory: [],
+  groceryReceipts: [],
+  groceryItems: [],
 };

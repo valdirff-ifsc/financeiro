@@ -3154,3 +3154,12 @@ body.modal-open {
   .dashboard-limit-row { flex-wrap:wrap; }
   .dashboard-limit-row strong { margin-right:0; }
 }
+
+/* Cupons e consumo */
+.receipt-table input,
+.receipt-table select { min-width: 84px; }
+.receipt-table td:nth-child(1) input,
+.receipt-table td:nth-child(2) input { min-width: 150px; }
+.consumption-delta { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); }
+.consumption-delta svg { width: 14px; height: 14px; }
+.form-error { margin: 10px 0 0; color: #b42318; font-size: 0.9rem; }

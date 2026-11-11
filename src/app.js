@@ -1,8 +1,8 @@
 import { defaultData } from "./data.js";
 import {
   Activity, ArrowDownLeft, ArrowDownUp, ArrowRight, ArrowRightLeft, ArrowUpRight, Banknote, BadgeDollarSign, CalendarCheck,
-  CalendarClock, CalendarRange, ChartNoAxesCombined, Check, ChevronLeft, ChevronRight,
-  CircleCheckBig, CircleDollarSign, CreditCard, Download, Equal, FileText, HandCoins, House, Info, Landmark, Layers3,
+  CalendarClock, CalendarRange, Camera, ChartNoAxesCombined, Check, ChevronLeft, ChevronRight,
+  ArrowDown, ArrowUp, CircleCheckBig, CircleDollarSign, CreditCard, Download, Equal, FileText, HandCoins, House, Info, Landmark, Layers3,
   LayoutDashboard, ListChecks, LogIn, LogOut, Menu, Minus, Pause, Pencil, Percent, SquarePen, CalendarDays,
   PiggyBank, Play, Plus, ReceiptText, Repeat2, Save, Settings, Settings2, ShieldCheck, ShoppingBasket,
   Sparkles, Tags, Target, Trash2, TrendingUp, Undo2, Wallet, WalletCards, X, createIcons,
@@ -13,7 +13,9 @@ import "../styles/vc.css";
 import { exportData, loadData, saveData } from "./storage.js";
 import {
   deleteRemote,
+  getAccessToken,
   getSessionUser,
+  insertManyRemote,
   insertRemote,
   loadRemoteData,
   onAuthChange,
@@ -25,6 +27,8 @@ import {
   toDbAccount,
   toDbCard,
   toDbCategory,
+  toDbGroceryItem,
+  toDbGroceryReceipt,
   toDbInvestment,
   toDbInvestmentHistory,
   toDbMarketGroup,
@@ -34,6 +38,7 @@ import {
   toDbTransaction,
   updateRemote,
 } from "./remoteStore.js";
+import { GROCERY_CATEGORIES, GROCERY_UNITS, categoryTotals, compareMonths, formatQuantity, productHistory, sanitizeReceipt } from "./groceries.js";
 import {
   addMonths,
   calculateFinance,
@@ -94,6 +99,7 @@ const state = {
   quickAddPreset: null,
   formDirty: false,
   saving: false,
+  receiptDraft: null,
 };
 
 let pendingScrollRestore = null;
@@ -202,6 +208,8 @@ const navItems = [
   { route: "pending", label: "Fixo", icon: "repeat-2" },
   { route: "future", label: "Lançar", icon: "square-pen" },
   { route: "history", label: "Histórico", icon: "chart-no-axes-combined" },
+  { route: "receipts", label: "Cupons", icon: "camera" },
+  { route: "consumption", label: "Consumo", icon: "shopping-basket" },
   { route: "investments", label: "Investimentos", icon: "piggy-bank" },
   { route: "goals", label: "Metas", icon: "target" },
   { route: "registrations", label: "Cadastros", icon: "settings-2" },
@@ -299,8 +307,8 @@ function titleCase(value) {
 function refreshIcons() {
   createIcons({ icons: {
     Activity, ArrowDownLeft, ArrowDownUp, ArrowRight, ArrowRightLeft, ArrowUpRight, BadgeDollarSign, Banknote, CalendarCheck,
-    CalendarClock, CalendarRange, ChartNoAxesCombined, Check, ChevronLeft, ChevronRight,
-    CircleCheckBig, CircleDollarSign, CreditCard, Download, Equal, FileText, HandCoins, House, Info, Landmark, Layers3,
+    CalendarClock, CalendarRange, Camera, ChartNoAxesCombined, Check, ChevronLeft, ChevronRight,
+    ArrowDown, ArrowUp, CircleCheckBig, CircleDollarSign, CreditCard, Download, Equal, FileText, HandCoins, House, Info, Landmark, Layers3,
     LayoutDashboard, ListChecks, LogIn, LogOut, Menu, Minus, Pause, Pencil, Percent, SquarePen, CalendarDays,
     PiggyBank, Play, Plus, ReceiptText, Repeat2, Save, Settings, Settings2, ShieldCheck, ShoppingBasket,
     Sparkles, Tags, Target, Trash2, TrendingUp, Undo2, Wallet, WalletCards, X,
@@ -436,6 +444,8 @@ const tableCollections = {
   investments: "investments",
   market_groups: "marketGroups",
   market_history: "marketHistory",
+  grocery_receipts: "groceryReceipts",
+  grocery_items: "groceryItems",
   planning_items: "planningItems",
   transactions: "transactions",
 };
@@ -498,6 +508,25 @@ function localFromDb(table, row) {
       id: row.id,
       name: row.name,
       forecast: value(row.forecast),
+      createdBy: row.created_by,
+    }),
+    grocery_receipts: () => ({
+      id: row.id,
+      store: row.store || "",
+      purchaseDate: row.purchase_date,
+      total: value(row.total),
+      createdBy: row.created_by,
+    }),
+    grocery_items: () => ({
+      id: row.id,
+      receiptId: row.receipt_id,
+      purchaseDate: row.purchase_date,
+      name: row.name,
+      product: row.product,
+      category: row.category,
+      quantity: Number(row.quantity || 0),
+      unit: row.unit,
+      totalPrice: value(row.total_price),
       createdBy: row.created_by,
     }),
     market_history: () => ({
@@ -593,6 +622,7 @@ async function dbDelete(table, id) {
   const collection = tableCollections[table];
   if (!collection) return null;
   state.data[collection] = state.data[collection].filter((item) => item.id !== id);
+  if (table === "grocery_receipts") state.data.groceryItems = state.data.groceryItems.filter((item) => item.receiptId !== id);
   return null;
 }
 
@@ -690,6 +720,8 @@ function routeMeta(route) {
     categories: ["Categorias", "Classificação e orçamentos"],
     settings: ["Configurações", "Preferências do assistente"],
     market: ["Mercado", "Previsão e histórico de compras"],
+    receipts: ["Cupons", "Foto do cupom vira lista de itens"],
+    consumption: ["Consumo", "O que consumimos de mercado, mês a mês"],
   };
   return map[route] || map.dashboard;
 }
@@ -782,6 +814,8 @@ function render() {
     categories: renderCategories,
     settings: renderSettings,
     market: () => marketPlanning(calculateFinance(state.data, state.month)),
+    receipts: renderReceipts,
+    consumption: renderConsumption,
   };
   appRoot.innerHTML = (routes[state.route] || renderDashboard)();
   formatMoneyInputs();
@@ -2512,6 +2546,11 @@ async function handleFormSubmit(form) {
   const householdId = state.householdId;
   const userId = state.user?.id;
 
+  if (kind === "receipt-save") {
+    await saveReceiptDraft();
+    return;
+  }
+
   if (kind === "goal") {
     const category = state.data.categories.find((item) => item.id === form.dataset.categoryId);
     if (!category) return;
@@ -2753,6 +2792,224 @@ async function handleFormSubmit(form) {
     await dbUpdate("household_settings", householdId, toDbSettings(settings), "household_id");
     await persist("Configurações salvas.");
   }
+}
+
+// ---------- Cupons de mercado e consumo ----------
+
+const receiptState = { scanning: false, error: "" };
+
+function receiptItemRow(item, index) {
+  const field = (name, extra = "") => `data-draft-index="${index}" data-draft-field="${name}" ${extra}`;
+  return `
+    <tr>
+      <td><input ${field("name")} value="${escapeHtml(item.name)}" aria-label="Texto no cupom" /></td>
+      <td><input ${field("product")} value="${escapeHtml(item.product)}" aria-label="Produto" required /></td>
+      <td><select ${field("category")} aria-label="Categoria">${GROCERY_CATEGORIES.map((c) => `<option ${c === item.category ? "selected" : ""}>${escapeHtml(c)}</option>`).join("")}</select></td>
+      <td><input ${field("quantity", 'type="number" step="any" min="0"')} value="${escapeHtml(item.quantity)}" aria-label="Quantidade" /></td>
+      <td><select ${field("unit")} aria-label="Unidade">${GROCERY_UNITS.map((u) => `<option ${u === item.unit ? "selected" : ""}>${u}</option>`).join("")}</select></td>
+      <td><input ${field("totalPrice", 'type="number" step="0.01" min="0"')} value="${escapeHtml(item.totalPrice)}" aria-label="Valor" /></td>
+      <td><button class="action-link" type="button" data-action="draft-remove-row" data-index="${index}" aria-label="Remover item"><i data-lucide="trash-2"></i></button></td>
+    </tr>`;
+}
+
+function receiptDraftForm(draft) {
+  const total = draft.items.reduce((sum, item) => sum + toNumber(item.totalPrice), 0);
+  return `
+    <form class="panel receipt-draft" data-form="receipt-save">
+      <div class="panel-header"><div><h2 class="panel-title">Revise antes de salvar</h2><p class="panel-subtitle">A IA pode errar. Corrija o que precisar. Total dos itens: <strong data-draft-total>${formatCurrency(total)}</strong></p></div></div>
+      <div class="record-form compact-form">
+        <label class="form-group wide"><span class="form-label">Mercado</span><input data-draft-meta="store" value="${escapeHtml(draft.store)}" /></label>
+        <label class="form-group"><span class="form-label">Data da compra</span><input data-draft-meta="date" type="date" value="${escapeHtml(draft.date)}" required /></label>
+      </div>
+      <div class="table-wrap">
+        <table class="receipt-table">
+          <thead><tr><th>No cupom</th><th>Produto</th><th>Categoria</th><th>Qtd</th><th>Un</th><th>Valor (R$)</th><th></th></tr></thead>
+          <tbody>${draft.items.map(receiptItemRow).join("")}</tbody>
+        </table>
+      </div>
+      <div class="form-actions">
+        <button class="button ghost" type="button" data-action="draft-discard"><i data-lucide="x"></i><span>Descartar</span></button>
+        <button class="button ghost" type="button" data-action="draft-add-row"><i data-lucide="plus"></i><span>Item</span></button>
+        <button class="button" type="submit"><i data-lucide="save"></i><span>Salvar cupom</span></button>
+      </div>
+    </form>`;
+}
+
+function renderReceipts() {
+  const receipts = state.data.groceryReceipts
+    .filter((receipt) => String(receipt.purchaseDate).slice(0, 7) === state.month)
+    .sort((a, b) => String(b.purchaseDate).localeCompare(String(a.purchaseDate)));
+  const draft = state.receiptDraft;
+  return `
+    <section class="panel">
+      <div class="panel-header"><div><h2 class="panel-title">Enviar cupom de mercado</h2><p class="panel-subtitle">Tire uma foto do cupom. A IA lê os itens e você confirma antes de salvar.</p></div></div>
+      <input type="file" accept="image/*" data-receipt-file hidden />
+      <div class="form-actions" style="justify-content:flex-start">
+        <button class="button" type="button" data-action="pick-receipt" ${receiptState.scanning ? "disabled" : ""}><i data-lucide="camera"></i><span>${receiptState.scanning ? "Lendo cupom..." : "Enviar foto do cupom"}</span></button>
+      </div>
+      ${receiptState.error ? `<p class="form-error" role="alert">${escapeHtml(receiptState.error)}</p>` : ""}
+    </section>
+    ${draft ? receiptDraftForm(draft) : ""}
+    <section class="table-panel">
+      <div class="table-header"><div><h3 class="table-title">Cupons de ${escapeHtml(monthLabel(state.month))}</h3><p class="table-subtitle">${receipts.length} cupom(ns)</p></div></div>
+      <div class="split-list">
+        ${receipts
+          .map((receipt) => {
+            const count = state.data.groceryItems.filter((item) => item.receiptId === receipt.id).length;
+            return `
+              <div class="split-row">
+                <span><strong>${escapeHtml(receipt.store || "Mercado")}</strong><span>${escapeHtml(formatDate(receipt.purchaseDate))} · ${count} item(ns)</span></span>
+                <span class="row-actions">
+                  <strong>${formatCurrency(receipt.total)}</strong>
+                  <button class="action-link" type="button" data-action="delete" data-collection="grocery_receipts" data-id="${receipt.id}"><i data-lucide="trash-2"></i><span>Excluir</span></button>
+                </span>
+              </div>`;
+          })
+          .join("") || `<div class="empty-state compact">Nenhum cupom neste mês.</div>`}
+      </div>
+    </section>`;
+}
+
+function deltaCell(row) {
+  if (row.previousQuantity === null) return `<span class="muted">novo</span>`;
+  if (!row.delta) return `<span class="muted">igual</span>`;
+  const arrow = row.delta > 0 ? "arrow-up" : "arrow-down";
+  const pct = row.deltaPct === null ? "" : ` ${Math.abs(Math.round(row.deltaPct * 100))}%`;
+  return `<span class="consumption-delta"><i data-lucide="${arrow}"></i>${escapeHtml(formatQuantity(Math.abs(row.delta), row.unit))}${pct}</span>`;
+}
+
+function renderConsumption() {
+  const items = state.data.groceryItems;
+  const previousMonth = addMonths(state.month, -1);
+  const rows = compareMonths(items, state.month, previousMonth);
+  const spent = rows.reduce((sum, row) => sum + row.total, 0);
+  const categories = categoryTotals(rows);
+  const months = Array.from({ length: 6 }, (_, index) => addMonths(state.month, index - 5));
+  const top = rows.slice(0, 15);
+  const history = top.map((row) => ({ row, series: productHistory(items, row.product, row.unit, months) }));
+  const receiptCount = state.data.groceryReceipts.filter((receipt) => String(receipt.purchaseDate).slice(0, 7) === state.month).length;
+
+  if (!rows.length) {
+    return `<section class="panel"><div class="empty-state">Nenhum item registrado em ${escapeHtml(monthLabel(state.month))}. Envie um cupom na aba Cupons.</div></section>`;
+  }
+  return `
+    <section class="metric-grid">
+      ${metricCard({ label: "Gasto em itens", value: formatCurrency(spent), note: `${receiptCount} cupom(ns)`, icon: "shopping-basket" })}
+      ${metricCard({ label: "Produtos diferentes", value: String(rows.length), note: `vs ${monthLabel(previousMonth)}`, icon: "layers-3" })}
+      ${metricCard({ label: "Maior categoria", value: categories[0]?.category || "-", note: formatCurrency(categories[0]?.total || 0), icon: "tags" })}
+    </section>
+    <section class="table-panel">
+      <div class="table-header"><div><h3 class="table-title">Consumo de ${escapeHtml(monthLabel(state.month))}</h3><p class="table-subtitle">Quantidade por produto e variação contra ${escapeHtml(monthLabel(previousMonth))}</p></div></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Produto</th><th>Categoria</th><th>Quantidade</th><th>vs mês anterior</th><th>Gasto</th></tr></thead>
+          <tbody>${rows.map((row) => `<tr><td><strong>${escapeHtml(row.product)}</strong></td><td>${escapeHtml(row.category)}</td><td>${escapeHtml(formatQuantity(row.quantity, row.unit))}</td><td>${deltaCell(row)}</td><td>${formatCurrency(row.total)}</td></tr>`).join("")}</tbody>
+        </table>
+      </div>
+    </section>
+    <section class="table-panel">
+      <div class="table-header"><div><h3 class="table-title">Mês a mês</h3><p class="table-subtitle">Quantidade dos 15 produtos de maior gasto nos últimos 6 meses</p></div></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Produto</th>${months.map((month) => `<th>${escapeHtml(monthLabel(month).slice(0, 3))}</th>`).join("")}</tr></thead>
+          <tbody>${history.map(({ row, series }) => `<tr><td><strong>${escapeHtml(row.product)}</strong></td>${series.map((point) => `<td>${point.quantity ? escapeHtml(formatQuantity(point.quantity, row.unit)) : "-"}</td>`).join("")}</tr>`).join("")}</tbody>
+        </table>
+      </div>
+    </section>
+    <section class="table-panel">
+      <div class="table-header"><div><h3 class="table-title">Por categoria</h3></div></div>
+      <div class="split-list">${categories.map((entry) => `<div class="split-row"><span><strong>${escapeHtml(entry.category)}</strong><span>${entry.products} produto(s)</span></span><strong>${formatCurrency(entry.total)}</strong></div>`).join("")}</div>
+    </section>`;
+}
+
+async function compressReceiptImage(file) {
+  const bitmap = await createImageBitmap(file);
+  const scale = Math.min(1, 2000 / Math.max(bitmap.width, bitmap.height));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(bitmap.width * scale);
+  canvas.height = Math.round(bitmap.height * scale);
+  canvas.getContext("2d").drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  bitmap.close?.();
+  for (const quality of [0.85, 0.7, 0.55]) {
+    const url = canvas.toDataURL("image/jpeg", quality);
+    if (url.length < 3_500_000) return url;
+  }
+  throw new Error("Imagem grande demais. Aproxime a câmera e tente de novo.");
+}
+
+async function scanReceiptFile(file) {
+  receiptState.scanning = true;
+  receiptState.error = "";
+  render();
+  try {
+    const image = await compressReceiptImage(file);
+    const token = await getAccessToken();
+    const response = await fetch("/api/parse-receipt", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ image }),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || "Não foi possível ler o cupom.");
+    const parsed = sanitizeReceipt(body);
+    if (!parsed.items.length) throw new Error("Nenhum item encontrado. Tente uma foto mais nítida e inteira.");
+    state.receiptDraft = { store: parsed.store, date: parsed.date || todayIso(), items: parsed.items };
+  } catch (error) {
+    console.error(error);
+    receiptState.error = error.message || "Não foi possível ler o cupom.";
+  } finally {
+    receiptState.scanning = false;
+    render();
+  }
+}
+
+function todayIso() {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+}
+
+async function saveReceiptDraft() {
+  const draft = state.receiptDraft;
+  const householdId = state.householdId;
+  const userId = state.user?.id;
+  const items = draft.items
+    .map((item) => ({ ...item, product: item.product.trim(), name: item.name.trim(), quantity: toNumber(item.quantity), totalPrice: toNumber(item.totalPrice) }))
+    .filter((item) => item.product);
+  if (!draft.date) throw new Error("Informe a data da compra.");
+  if (!items.length) throw new Error("Inclua ao menos um item com produto.");
+  const total = Number(items.reduce((sum, item) => sum + item.totalPrice, 0).toFixed(2));
+  const receipt = await dbInsert("grocery_receipts", toDbGroceryReceipt({ store: draft.store.trim(), purchaseDate: draft.date, total }, householdId, userId));
+  try {
+    const rows = items.map((item) => toDbGroceryItem({ ...item, receiptId: receipt.id, purchaseDate: draft.date }, householdId, userId));
+    if (LOCAL_AUTH_BYPASS) {
+      rows.forEach((row) => state.data.groceryItems.unshift(localFromDb("grocery_items", { id: uid("grocery_items"), ...row })));
+    } else {
+      ignoreRealtimeUntil = Date.now() + 1800;
+      await insertManyRemote("grocery_items", rows);
+    }
+  } catch (error) {
+    await dbDelete("grocery_receipts", receipt.id).catch(() => {});
+    throw error;
+  }
+  state.receiptDraft = null;
+  state.month = draft.date.slice(0, 7);
+  await persist("Cupom salvo.");
+}
+
+function syncDraftField(target) {
+  const draft = state.receiptDraft;
+  if (!draft) return false;
+  if (target.dataset.draftMeta) {
+    draft[target.dataset.draftMeta] = target.value;
+    return true;
+  }
+  if (target.dataset.draftField) {
+    draft.items[Number(target.dataset.draftIndex)][target.dataset.draftField] = target.value;
+    const total = appRoot.querySelector("[data-draft-total]");
+    if (total) total.textContent = formatCurrency(draft.items.reduce((sum, item) => sum + toNumber(item.totalPrice), 0));
+    return true;
+  }
+  return false;
 }
 
 function setSidebarOpen(open) {
@@ -3005,6 +3262,17 @@ appRoot.addEventListener(
 );
 
 appRoot.addEventListener("change", (event) => {
+  const receiptFile = event.target.closest("[data-receipt-file]");
+  if (receiptFile) {
+    const file = receiptFile.files?.[0];
+    receiptFile.value = "";
+    if (file) scanReceiptFile(file);
+    return;
+  }
+  if (event.target.matches("[data-draft-field='category'], [data-draft-field='unit']")) {
+    syncDraftField(event.target);
+    return;
+  }
   const transactionType = event.target.closest('[data-form="transaction"] [name="type"]');
   if (transactionType) {
     transactionType.form.querySelectorAll('[data-transaction-field="transfer"]').forEach((field) => {
@@ -3033,6 +3301,11 @@ appRoot.addEventListener("change", (event) => {
 });
 
 appRoot.addEventListener("input", (event) => {
+  if (event.target.matches("[data-draft-field], [data-draft-meta]")) {
+    state.formDirty = true;
+    syncDraftField(event.target);
+    return;
+  }
   if (event.target.closest("form") && !event.target.matches("[data-transaction-search]")) state.formDirty = true;
   const search = event.target.closest("[data-transaction-search]");
   if (!search) return;
@@ -3219,6 +3492,21 @@ appRoot.addEventListener("click", async (event) => {
       console.error(error);
       showToast(error.message || "Não foi possível alterar o planejamento.");
     }
+  }
+
+  if (action === "pick-receipt") appRoot.querySelector("[data-receipt-file]")?.click();
+  if (action === "draft-discard") {
+    state.receiptDraft = null;
+    state.formDirty = false;
+    render();
+  }
+  if (action === "draft-add-row" && state.receiptDraft) {
+    state.receiptDraft.items.push({ name: "", product: "", category: "Outros", quantity: 1, unit: "un", totalPrice: 0 });
+    render();
+  }
+  if (action === "draft-remove-row" && state.receiptDraft) {
+    state.receiptDraft.items.splice(Number(target.dataset.index), 1);
+    render();
   }
 
   if (action === "export") exportData(state.data);

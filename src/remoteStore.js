@@ -11,6 +11,8 @@ const tableNames = [
   "market_history",
   "investments",
   "investment_history",
+  "grocery_receipts",
+  "grocery_items",
 ];
 
 function must(data, error) {
@@ -70,6 +72,11 @@ export async function requestPasswordReset(email, redirectTo) {
   if (error) throw error;
 }
 
+export async function getAccessToken() {
+  const { data } = await supabase.auth.getSession();
+  return data.session?.access_token || "";
+}
+
 export function onAuthChange(callback) {
   if (!supabaseConfigured) return { data: { subscription: { unsubscribe() {} } } };
   return supabase.auth.onAuthStateChange((_event, session) => callback(session?.user || null));
@@ -116,6 +123,8 @@ export async function loadRemoteData(user) {
     marketHistory,
     investments,
     investmentHistory,
+    groceryReceipts,
+    groceryItems,
   ] = await Promise.all([
     fetchSingle("household_settings", householdId),
     fetchRows("household_members", householdId),
@@ -128,6 +137,8 @@ export async function loadRemoteData(user) {
     fetchRows("market_history", householdId, "month"),
     fetchRows("investments", householdId),
     fetchRows("investment_history", householdId, "month"),
+    fetchOptionalRows("grocery_receipts", householdId, "purchase_date"),
+    fetchOptionalRows("grocery_items", householdId, "purchase_date"),
   ]);
 
   return {
@@ -158,6 +169,8 @@ export async function loadRemoteData(user) {
       marketHistory: marketHistory.map(fromMarketHistory),
       investments: investments.map(fromInvestment),
       investmentHistory: investmentHistory.map(fromInvestmentHistory),
+      groceryReceipts: groceryReceipts.map(fromGroceryReceipt),
+      groceryItems: groceryItems.map(fromGroceryItem),
     },
     householdId,
   };
@@ -192,6 +205,16 @@ async function resolveHouseholdId(user, memberships) {
 async function fetchRows(table, householdId, orderColumn = "created_at") {
   const response = await supabase.from(table).select("*").eq("household_id", householdId).order(orderColumn, { ascending: false });
   return must(response.data, response.error) || [];
+}
+
+// Tabelas novas: se a migração ainda não rodou, o app continua funcionando sem elas.
+async function fetchOptionalRows(table, householdId, orderColumn) {
+  const response = await supabase.from(table).select("*").eq("household_id", householdId).order(orderColumn, { ascending: false });
+  if (response.error) {
+    console.warn(`Tabela ${table} indisponível. Rode supabase/grocery_receipts.sql.`, response.error.message);
+    return [];
+  }
+  return response.data || [];
 }
 
 async function fetchSingle(table, householdId) {
@@ -383,6 +406,11 @@ export async function updateRemote(table, id, payload, idColumn = "id") {
   return must(data, error);
 }
 
+export async function insertManyRemote(table, rows) {
+  const { data, error } = await supabase.from(table).insert(rows).select("*");
+  return must(data, error);
+}
+
 export async function deleteRemote(table, id) {
   const { data, error } = await supabase.from(table).delete().eq("id", id).select("id");
   if (error) throw error;
@@ -531,6 +559,31 @@ export function toDbMarketHistory(item, householdId, userId) {
   };
 }
 
+export function toDbGroceryReceipt(item, householdId, userId) {
+  return {
+    household_id: householdId,
+    store: item.store || "",
+    purchase_date: item.purchaseDate,
+    total: item.total || 0,
+    created_by: item.createdBy || userId,
+  };
+}
+
+export function toDbGroceryItem(item, householdId, userId) {
+  return {
+    household_id: householdId,
+    receipt_id: item.receiptId,
+    purchase_date: item.purchaseDate,
+    name: item.name || item.product,
+    product: item.product,
+    category: item.category || "Outros",
+    quantity: item.quantity,
+    unit: item.unit || "un",
+    total_price: item.totalPrice || 0,
+    created_by: item.createdBy || userId,
+  };
+}
+
 export function toDbSettings(settings) {
   return {
     main_account_id: settings.mainAccountId || null,
@@ -642,6 +695,31 @@ function fromMarketHistory(row) {
     month: monthText(row.month),
     amount: money(row.amount),
     notes: row.notes,
+    createdBy: row.created_by,
+  };
+}
+
+function fromGroceryReceipt(row) {
+  return {
+    id: row.id,
+    store: row.store || "",
+    purchaseDate: row.purchase_date,
+    total: money(row.total),
+    createdBy: row.created_by,
+  };
+}
+
+function fromGroceryItem(row) {
+  return {
+    id: row.id,
+    receiptId: row.receipt_id,
+    purchaseDate: row.purchase_date,
+    name: row.name,
+    product: row.product,
+    category: row.category,
+    quantity: Number(row.quantity || 0),
+    unit: row.unit,
+    totalPrice: money(row.total_price),
     createdBy: row.created_by,
   };
 }
