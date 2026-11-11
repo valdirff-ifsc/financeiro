@@ -94,13 +94,13 @@ export default async function handler(req, res) {
     });
     if (!response.ok) {
       console.error("Groq error", response.status, await response.text());
-      return send(res, 502, { error: "A IA não conseguiu ler o cupom. Tente outra foto." });
+      return send(res, 502, { error: "A IA não conseguiu ler a nota fiscal. Tente outra foto." });
     }
     const completion = await response.json();
     const parsed = JSON.parse(completion.choices?.[0]?.message?.content || "{}");
     return send(res, 200, parsed);
   } catch (error) {
     console.error(error);
-    return send(res, 502, { error: "Falha ao ler o cupom. Tente novamente." });
+    return send(res, 502, { error: "Falha ao ler a nota fiscal. Tente novamente." });
   }
 }

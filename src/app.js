@@ -208,7 +208,7 @@ const navItems = [
   { route: "pending", label: "Fixo", icon: "repeat-2" },
   { route: "future", label: "Lançar", icon: "square-pen" },
   { route: "history", label: "Histórico", icon: "chart-no-axes-combined" },
-  { route: "receipts", label: "Cupons", icon: "camera" },
+  { route: "receipts", label: "Notas fiscais", icon: "camera" },
   { route: "consumption", label: "Consumo", icon: "shopping-basket" },
   { route: "investments", label: "Investimentos", icon: "piggy-bank" },
   { route: "goals", label: "Metas", icon: "target" },
@@ -720,7 +720,7 @@ function routeMeta(route) {
     categories: ["Categorias", "Classificação e orçamentos"],
     settings: ["Configurações", "Preferências do assistente"],
     market: ["Mercado", "Previsão e histórico de compras"],
-    receipts: ["Cupons", "Foto do cupom vira lista de itens"],
+    receipts: ["Notas fiscais", "Foto da nota fiscal vira lista de itens"],
     consumption: ["Consumo", "O que consumimos de mercado, mês a mês"],
   };
   return map[route] || map.dashboard;
@@ -2802,7 +2802,7 @@ function receiptItemRow(item, index) {
   const field = (name, extra = "") => `data-draft-index="${index}" data-draft-field="${name}" ${extra}`;
   return `
     <tr>
-      <td><input ${field("name")} value="${escapeHtml(item.name)}" aria-label="Texto no cupom" /></td>
+      <td><input ${field("name")} value="${escapeHtml(item.name)}" aria-label="Texto na nota" /></td>
       <td><input ${field("product")} value="${escapeHtml(item.product)}" aria-label="Produto" required /></td>
       <td><select ${field("category")} aria-label="Categoria">${GROCERY_CATEGORIES.map((c) => `<option ${c === item.category ? "selected" : ""}>${escapeHtml(c)}</option>`).join("")}</select></td>
       <td><input ${field("quantity", 'type="number" step="any" min="0"')} value="${escapeHtml(item.quantity)}" aria-label="Quantidade" /></td>
@@ -2823,14 +2823,14 @@ function receiptDraftForm(draft) {
       </div>
       <div class="table-wrap">
         <table class="receipt-table">
-          <thead><tr><th>No cupom</th><th>Produto</th><th>Categoria</th><th>Qtd</th><th>Un</th><th>Valor (R$)</th><th></th></tr></thead>
+          <thead><tr><th>Na nota</th><th>Produto</th><th>Categoria</th><th>Qtd</th><th>Un</th><th>Valor (R$)</th><th></th></tr></thead>
           <tbody>${draft.items.map(receiptItemRow).join("")}</tbody>
         </table>
       </div>
       <div class="form-actions">
         <button class="button ghost" type="button" data-action="draft-discard"><i data-lucide="x"></i><span>Descartar</span></button>
         <button class="button ghost" type="button" data-action="draft-add-row"><i data-lucide="plus"></i><span>Item</span></button>
-        <button class="button" type="submit"><i data-lucide="save"></i><span>Salvar cupom</span></button>
+        <button class="button" type="submit"><i data-lucide="save"></i><span>Salvar nota</span></button>
       </div>
     </form>`;
 }
@@ -2842,16 +2842,16 @@ function renderReceipts() {
   const draft = state.receiptDraft;
   return `
     <section class="panel">
-      <div class="panel-header"><div><h2 class="panel-title">Enviar cupom de mercado</h2><p class="panel-subtitle">Tire uma foto do cupom. A IA lê os itens e você confirma antes de salvar.</p></div></div>
+      <div class="panel-header"><div><h2 class="panel-title">Enviar nota fiscal de mercado</h2><p class="panel-subtitle">Tire uma foto da nota fiscal. A IA lê os itens e você confirma antes de salvar.</p></div></div>
       <input type="file" accept="image/*" data-receipt-file hidden />
       <div class="form-actions" style="justify-content:flex-start">
-        <button class="button" type="button" data-action="pick-receipt" ${receiptState.scanning ? "disabled" : ""}><i data-lucide="camera"></i><span>${receiptState.scanning ? "Lendo cupom..." : "Enviar foto do cupom"}</span></button>
+        <button class="button" type="button" data-action="pick-receipt" ${receiptState.scanning ? "disabled" : ""}><i data-lucide="camera"></i><span>${receiptState.scanning ? "Lendo nota..." : "Enviar foto da nota"}</span></button>
       </div>
       ${receiptState.error ? `<p class="form-error" role="alert">${escapeHtml(receiptState.error)}</p>` : ""}
     </section>
     ${draft ? receiptDraftForm(draft) : ""}
     <section class="table-panel">
-      <div class="table-header"><div><h3 class="table-title">Cupons de ${escapeHtml(monthLabel(state.month))}</h3><p class="table-subtitle">${receipts.length} cupom(ns)</p></div></div>
+      <div class="table-header"><div><h3 class="table-title">Notas fiscais de ${escapeHtml(monthLabel(state.month))}</h3><p class="table-subtitle">${receipts.length} nota(s)</p></div></div>
       <div class="split-list">
         ${receipts
           .map((receipt) => {
@@ -2865,7 +2865,7 @@ function renderReceipts() {
                 </span>
               </div>`;
           })
-          .join("") || `<div class="empty-state compact">Nenhum cupom neste mês.</div>`}
+          .join("") || `<div class="empty-state compact">Nenhuma nota fiscal neste mês.</div>`}
       </div>
     </section>`;
 }
@@ -2890,11 +2890,11 @@ function renderConsumption() {
   const receiptCount = state.data.groceryReceipts.filter((receipt) => String(receipt.purchaseDate).slice(0, 7) === state.month).length;
 
   if (!rows.length) {
-    return `<section class="panel"><div class="empty-state">Nenhum item registrado em ${escapeHtml(monthLabel(state.month))}. Envie um cupom na aba Cupons.</div></section>`;
+    return `<section class="panel"><div class="empty-state">Nenhum item registrado em ${escapeHtml(monthLabel(state.month))}. Envie uma nota fiscal na aba Notas fiscais.</div></section>`;
   }
   return `
     <section class="metric-grid">
-      ${metricCard({ label: "Gasto em itens", value: formatCurrency(spent), note: `${receiptCount} cupom(ns)`, icon: "shopping-basket" })}
+      ${metricCard({ label: "Gasto em itens", value: formatCurrency(spent), note: `${receiptCount} nota(s)`, icon: "shopping-basket" })}
       ${metricCard({ label: "Produtos diferentes", value: String(rows.length), note: `vs ${monthLabel(previousMonth)}`, icon: "layers-3" })}
       ${metricCard({ label: "Maior categoria", value: categories[0]?.category || "-", note: formatCurrency(categories[0]?.total || 0), icon: "tags" })}
     </section>
@@ -2950,13 +2950,13 @@ async function scanReceiptFile(file) {
       body: JSON.stringify({ image }),
     });
     const body = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(body.error || "Não foi possível ler o cupom.");
+    if (!response.ok) throw new Error(body.error || "Não foi possível ler a nota fiscal.");
     const parsed = sanitizeReceipt(body);
     if (!parsed.items.length) throw new Error("Nenhum item encontrado. Tente uma foto mais nítida e inteira.");
     state.receiptDraft = { store: parsed.store, date: parsed.date || todayIso(), items: parsed.items };
   } catch (error) {
     console.error(error);
-    receiptState.error = error.message || "Não foi possível ler o cupom.";
+    receiptState.error = error.message || "Não foi possível ler a nota fiscal.";
   } finally {
     receiptState.scanning = false;
     render();
@@ -2993,7 +2993,7 @@ async function saveReceiptDraft() {
   }
   state.receiptDraft = null;
   state.month = draft.date.slice(0, 7);
-  await persist("Cupom salvo.");
+  await persist("Nota fiscal salva.");
 }
 
 function syncDraftField(target) {
